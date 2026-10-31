@@ -489,6 +489,18 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 char last[300];
                 log_tail(u->log, last, sizeof last);
                 LOG("[gamebuild] compiling %s failed: %s\n", u->src, last);
+#ifdef __ANDROID__
+                {  // (the work folder goes away after a failure: the compiler's own message, into the log)
+                    FILE *ef = fopen(u->log, "rb");
+                    if (ef) {
+                        char eb[2048];
+                        size_t en = fread(eb, 1, sizeof eb - 1, ef);
+                        fclose(ef);
+                        eb[en] = 0;
+                        LOG("[gamebuild] %s\n", eb);
+                    }
+                }
+#endif
                 snprintf(why, why_size, "the game code didn't compile");
                 ok = false;
             }

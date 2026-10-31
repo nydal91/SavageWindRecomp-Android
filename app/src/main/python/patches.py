@@ -228,8 +228,10 @@ def _vfr_ratio(gen, a):
 # FPS++ does on the Wii U (v208 0x03415afc).
 
 def _gui_speed(gen, a):
+    # (s0 read straight from c->v, as simd.h's VS32 does: with --simd asm - the default on arm64 hosts - the chunk
+    # includes cpu.h only and VS32 was undeclared)
     assert _word(gen, a) == 0xbd0b2100, hex(_word(gen, a))  # str s0, [x8, #0xb20]
-    return ('{ extern float rt_gui_speed(float); union { uint32_t u; float f; } s = { .u = (uint32_t)VS32(0) }; '
+    return ('{ extern float rt_gui_speed(float); union { uint32_t u; float f; } s = { .u = *(const uint32_t __attribute__((may_alias)) *)&c->v[0] }; '
             's.f = rt_gui_speed(s.f); ST32(c->x[8] + 0xb20, s.u); }'
             f'  /* {a:#x}: str s0, [x8, #0xb20] (GUI speed) */')
 
