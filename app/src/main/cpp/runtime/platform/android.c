@@ -101,8 +101,8 @@ void plat_init(void) { log_to_file(); }
 bool plat_exe_path(char *buf, size_t size) {
     const char *env = getenv("SAVAGEWIND_DATA_ROOT");
     if (!env || !*env) return false;
-    snprintf(buf, size, "%s", env);
-    return true;
+    // a path *in* the data root: rt_paths_init() strips the last component (the exe's name) to get its folder
+    return (size_t)snprintf(buf, size, "%s/savagewind", env) < size;
 }
 
 // No process replacement inside an app. Only the guest-space constructor calls this, and on

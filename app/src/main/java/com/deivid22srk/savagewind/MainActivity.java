@@ -157,7 +157,8 @@ public class MainActivity extends SDLActivity {
         // clang's freestanding builtin headers (CI-extracted) land in the same folder the
         // on-device compile gets via -I, next to the runtime's own headers and the shims.
         copyTree("clang-include", new File(root, "gamelib-src"));
-        copyTree("fonts", new File(root, "fonts"));
+        // into the data root itself: rt_resource() looks for FiraSans-*.ttf / NotoSansThai-*.ttf beside the "exe"
+        copyTree("fonts", root);
         copyOne("icon.png", new File(root, "icon.png"));
     }
 

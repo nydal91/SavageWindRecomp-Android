@@ -383,6 +383,49 @@ static void create_device(void) {
         ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
     }
     g_vk.present_wait = pwait;
+#ifdef __ANDROID__
+    // Mobile drivers lack some features desktop drivers all have: vkCreateDevice fails on any of them
+    // (VK_ERROR_FEATURE_NOT_PRESENT). Ask for only what the driver has, and log what is missing.
+    {
+        VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div_h = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
+        VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc_h = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT,
+            .pNext = g_vk.divisor ? &div_h : NULL};
+        VkPhysicalDeviceMaintenance5FeaturesKHR m5_h = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR,
+                                                        .pNext = g_vk.custom_border ? (void *)&cbc_h : g_vk.divisor ? (void *)&div_h : NULL};
+        VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                                                .pNext = m5 ? (void *)&m5_h : g_vk.custom_border ? (void *)&cbc_h
+                                                                            : g_vk.divisor ? (void *)&div_h : NULL};
+        VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
+        VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12};
+        VkPhysicalDeviceFaultFeaturesEXT ff_h = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .pNext = &h11};
+        VkPhysicalDeviceAddressBindingReportFeaturesEXT abr_h = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT, .pNext = &ff_h};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &abr_h};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+#define SW_HAVE(on, h, field)                                                   \
+    if ((on).field && !(h).field) {                                             \
+        LOG("[vk] driver lacks " #field ": off\n");                             \
+        (on).field = VK_FALSE;                                                  \
+    }
+        SW_HAVE(f11, h11, storageBuffer16BitAccess)
+        SW_HAVE(f12, h12, timelineSemaphore) SW_HAVE(f12, h12, shaderInt8) SW_HAVE(f12, h12, samplerMirrorClampToEdge)
+        SW_HAVE(f12, h12, uniformAndStorageBuffer8BitAccess) SW_HAVE(f12, h12, storageBuffer8BitAccess)
+        SW_HAVE(f12, h12, scalarBlockLayout)
+        SW_HAVE(f13, h13, dynamicRendering) SW_HAVE(f13, h13, synchronization2)
+        SW_HAVE(f13, h13, shaderDemoteToHelperInvocation) SW_HAVE(f13, h13, shaderTerminateInvocation)
+        SW_HAVE(f13, h13, maintenance4) SW_HAVE(f13, h13, pipelineCreationCacheControl)
+        if (m5) SW_HAVE(m5_on, m5_h, maintenance5)
+        if (g_vk.custom_border) {
+            SW_HAVE(cbc, cbc_h, customBorderColors) SW_HAVE(cbc, cbc_h, customBorderColorWithoutFormat)
+        }
+        if (g_vk.divisor) SW_HAVE(div, div_h, vertexAttributeInstanceRateDivisor)
+        if (fault) SW_HAVE(ff, ff_h, deviceFault)
+        if (addr_report) SW_HAVE(abr, abr_h, reportAddressBinding)
+#undef SW_HAVE
+    }
+#endif
     float prio[2] = {1.0f, 1.0f};
     // two queues when the family has them: the second one presents (present thread below)
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
@@ -735,6 +778,19 @@ static void create_swapchain(void) {
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){(uint32_t)w, (uint32_t)h};
+    VkSurfaceTransformFlagBitsKHR pre = caps.currentTransform;
+#ifdef __ANDROID__
+    // The panel's own orientation is portrait: currentTransform says ROTATE_90/270 in landscape, and handing it
+    // back as preTransform claims the frames are already rotated (they are not: the picture shows on its side).
+    // IDENTITY lets the compositor rotate, with images the size of the (landscape) window.
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        if (pre & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR))
+            ext = (VkExtent2D){ext.height, ext.width};
+        if (w > 0 && h > 0 && ((w > h) != (ext.width > ext.height))) ext = (VkExtent2D){ext.height, ext.width};
+        LOG("[vk] surface transform 0x%x -> identity, %ux%u\n", (unsigned)pre, ext.width, ext.height);
+        pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    }
+#endif
     if (!ext.width || !ext.height) return;  // minimised
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, NULL);
@@ -755,7 +811,7 @@ static void create_swapchain(void) {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_vk.surface, .minImageCount = count,
         .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = pre,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = mode, .clipped = VK_TRUE,
         .oldSwapchain = old};
     // (what decides whether the display can follow the game: the window, the mode, the display's refresh rate)
@@ -925,6 +981,13 @@ static void pt_retire(void) {
     pthread_mutex_unlock(&pt_m);
 }
 
+#ifdef __ANDROID__
+// SUBOPTIMAL there means only "not pre-rotated": the swapchain is IDENTITY on purpose (create_swapchain) and the
+// compositor rotates, so every present said it and the swapchain was rebuilt each frame. Out of date still rebuilds.
+#define SC_STALE(r) ((r) == VK_ERROR_OUT_OF_DATE_KHR)
+#else
+#define SC_STALE(r) ((r) == VK_ERROR_OUT_OF_DATE_KHR || (r) == VK_SUBOPTIMAL_KHR)
+#endif
 static void recreate_swapchain(void) {
     vk_present_idle();
     pt_retire();
@@ -957,7 +1020,7 @@ static void *present_thread(void *arg) {
         VkPresentInfoKHR pi = pres_info;
         pthread_mutex_unlock(&pres_m);
         VkResult r = queue_present(g_vk.present_queue, &pi);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) atomic_store(&pres_stale, 1);
+        if (SC_STALE(r)) atomic_store(&pres_stale, 1);
         else if (r != VK_SUCCESS) { static int n; if (n++ < 5) LOG("[vk] present failed: %d\n", r); }
         pthread_mutex_lock(&pres_m);
         pres_busy = false;
@@ -989,7 +1052,7 @@ static bool present_image(uint32_t img, VkSemaphore sem) {
         VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem,
                                .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
         VkResult r = queue_present(g_vk.queue, &pi);
-        return !(r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR);
+        return !SC_STALE(r);
     }
     pthread_mutex_lock(&pres_m);
     while (pres_busy) pthread_cond_wait(&pres_cv, &pres_m);
