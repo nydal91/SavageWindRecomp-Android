@@ -37,3 +37,8 @@ splash.png
 *.log
 app/src/main/assets/clang-include/
 __pycache__/
+
+# Build products of scripts/build_deps_android.sh (the generator's ctypes wrappers)
+app/src/main/python/unicorn/
+app/src/main/python/capstone/
+app/.cxx/

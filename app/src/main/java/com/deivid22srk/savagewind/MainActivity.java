@@ -73,6 +73,9 @@ public class MainActivity extends SDLActivity {
             Os.setenv("SAVAGEWIND_CRASHLOG", sBootLog.getAbsolutePath(), true);
             Os.setenv("SAVAGEWIND_LIB_DIR", libdir, true);
             Os.setenv("SAVAGEWIND_CC", libdir + "/libclang.so", true);
+            // the generator's ctypes packages load their C library from here (build_deps_android.sh)
+            Os.setenv("LIBUNICORN_PATH", libdir, true);
+            Os.setenv("LIBCAPSTONE_PATH", libdir, true);
             File bin = new File(getFilesDir(), "bin");
             bin.mkdirs();
             try {

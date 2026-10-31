@@ -34,3 +34,12 @@ bool shader_precompile_available(void);  // (false on macOS: Metal compiles its 
 #ifdef __cplusplus
 }
 #endif
+
+#if defined(__cplusplus) && defined(__ANDROID__)
+// bionic's <stdatomic.h> in C++ maps atomic_load / atomic_store to std::atomic's, which don't take
+// the C11 _Atomic fields above (the UI, runtime/ui/launcher.mm, reads them): the C11 builtins do.
+static inline int atomic_load(_Atomic int *p) { return __c11_atomic_load(p, __ATOMIC_SEQ_CST); }
+static inline bool atomic_load(_Atomic bool *p) { return __c11_atomic_load(p, __ATOMIC_SEQ_CST); }
+static inline void atomic_store(_Atomic int *p, int v) { __c11_atomic_store(p, v, __ATOMIC_SEQ_CST); }
+static inline void atomic_store(_Atomic bool *p, bool v) { __c11_atomic_store(p, v, __ATOMIC_SEQ_CST); }
+#endif

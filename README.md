@@ -27,7 +27,7 @@ compila para Android via **GitHub Actions** — o APK é gerado na nuvem, nunca 
 | Renderizador Vulkan (NVN → Vulkan) | Portado (exige Vulkan 1.3 no aparelho) |
 | Janela/entrada (SDL3) | Touch mapeado como mouse; controles Bluetooth/USB via SDL3 |
 | Interface (ImGui, setup, configuração) | Portada, com seletor de pastas via SAF |
-| Geração do código do jogo (tools/*.py via Chaquopy) | Integrada; depende dos wheels unicorn/capstone (veja abaixo) |
+| Geração do código do jogo (tools/*.py via Chaquopy) | Integrada; unicorn/capstone compilados para Android (libunicorn.so / libcapstone.so) |
 | Compilador no dispositivo (clang + lld no APK) | Integrado (experimental) |
 | Player de filmes (FFmpeg) | Portado (H.264/AAC, VP8/9, Opus, Vorbis) |
 
@@ -52,10 +52,10 @@ compila para Android via **GitHub Actions** — o APK é gerado na nuvem, nunca 
    ```
    SavageWind/
      exefs/   main, main.npdm, rtld, sdk, subsdk0
-     romfs/   o RomFS completo (jogo base + 1.8.2 mesclados)
+     romfs/   o RomFS completo (jogo base + atualização 1.8.2 ou 1.9.0 mesclados)
    ```
 4. Abra o app → **"Game files folder"** → escolha a pasta com `exefs/` e `romfs/` →
-   **"Set up game files"**. O app confere a versão (1.8.2), copia os arquivos, monta a imagem de
+   **"Set up game files"**. O app confere a versão (1.8.2 ou 1.9.0), copia os arquivos, monta a imagem de
    dados e recompila o código do jogo no aparelho. Quando terminar, o jogo inicia.
 5. Nas próximas vezes o jogo abre direto. **"Quit to Start Screen"** volta à tela de
    configuração (Play, opções, apagar arquivos do jogo).
@@ -65,11 +65,10 @@ extraídos e descriptografados (o `main` do ExeFS é um NSO já aberto).
 
 ## Limitações conhecidas
 
-- **Geração do código no dispositivo**: o gerador (`tools/gen.py`) usa `unicorn` e `capstone`
-  (emulação/desassembly ARM64). Não existem wheels Android prontos para eles; o fluxo completo
-  no aparelho depende de compilá-los (scripts/experimento em `scripts/build_wheels_android.sh`,
-  em preparo). Sem os wheels, o setup copia e prepara tudo, mas a etapa de recompilação falha
-  com a mensagem do log. Alternativa enquanto isso: acompanhe as issues.
+- **Geração do código no dispositivo**: o gerador (`tools/gen.py`) usa `unicorn` e `capstone`.
+  Não há wheels Android no PyPI, mas os dois são wrappers ctypes de uma biblioteca C:
+  `scripts/build_deps_android.sh` compila `libunicorn.so` / `libcapstone.so` (só ARM64) para o
+  APK e copia os pacotes Python ao lado do `gen.py` (`LIBUNICORN_PATH` / `LIBCAPSTONE_PATH`).
 - **Aparelhos com VA de 39 bits** não alocam a janela do guest (mensagem clara no app).
 - **Vulkan 1.3** é obrigatório (sem fallback para GLES; o backend original é Vulkan-only).
 - Emulação x86 (ex.: BlueStacks) não é suportada — aparelhos físicos arm64 apenas.

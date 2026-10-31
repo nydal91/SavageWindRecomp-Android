@@ -151,6 +151,35 @@ if [ ! -f "$JNI/libclang.so" ]; then
     mkdir -p "$ASSETS/clang-include" && cp "$RES"/*.h "$ASSETS/clang-include/"
 fi
 
+# ---- the generator's Python packages: unicorn + capstone (tools/gen.py, tools/analyze.py).
+# PyPI has no Android wheels, but both are ctypes wrappers around one C library: the library is
+# cross-built here (ARM64 only, all gen.py uses) into nativeLibraryDir, and the pure-Python
+# package goes next to gen.py. MainActivity points LIBUNICORN_PATH / LIBCAPSTONE_PATH there.
+PYDIR=$ROOT/app/src/main/python
+if [ ! -f "$JNI/libunicorn.so" ] || [ ! -f "$PYDIR/unicorn/__init__.py" ]; then
+    fetch https://files.pythonhosted.org/packages/b2/1b/b4248aa8422e86de690cf8e85cf8feae4c33405a097d1ebe71570bdaa6f5/unicorn-2.1.4.tar.gz \
+          00567a70e323f749b419cd86bee4f9115beab7ebba32194581c090cbb7c59cff unicorn.tar.gz
+    unpack unicorn.tar.gz unicorn
+    cmake -S "$W/unicorn/src" -B "$W/unicorn/build" "${CMAKE_ARGS[@]}" \
+        -DUNICORN_ARCH=aarch64 -DBUILD_SHARED_LIBS=ON -DUNICORN_LEGACY_STATIC_ARCHIVE=OFF \
+        -DUNICORN_BUILD_TESTS=OFF -DUNICORN_INSTALL=OFF
+    cmake --build "$W/unicorn/build" -j"$JOBS"
+    cp -L "$W/unicorn/build/libunicorn.so" "$JNI/libunicorn.so"
+    rm -rf "$PYDIR/unicorn" && cp -R "$W/unicorn/unicorn" "$PYDIR/unicorn"
+fi
+if [ ! -f "$JNI/libcapstone.so" ] || [ ! -f "$PYDIR/capstone/__init__.py" ]; then
+    fetch https://files.pythonhosted.org/packages/39/01/6516910f546fbb996068207b9dd0229b14bc8dae223114d5e0e27d3cad11/capstone-5.0.9.tar.gz \
+          0429af292ddc604d3c9344696807e281d5e728db029f00e6a4ea9e3bff1aac9e capstone.tar.gz
+    unpack capstone.tar.gz capstone
+    cmake -S "$W/capstone/src" -B "$W/capstone/build" "${CMAKE_ARGS[@]}" \
+        -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=OFF -DCAPSTONE_ARCHITECTURE_DEFAULT=OFF \
+        -DCAPSTONE_ARM64_SUPPORT=ON -DCAPSTONE_BUILD_TESTS=OFF -DCAPSTONE_BUILD_CSTOOL=OFF \
+        -DCAPSTONE_INSTALL=OFF
+    cmake --build "$W/capstone/build" -j"$JOBS"
+    cp -L "$W/capstone/build/libcapstone.so" "$JNI/libcapstone.so"
+    rm -rf "$PYDIR/capstone" && cp -R "$W/capstone/capstone" "$PYDIR/capstone"
+fi
+
 touch "$DEPS/.ok"
 echo "deps ready:"
 ls "$DEPS/lib" "$JNI"
