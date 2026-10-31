@@ -16,6 +16,8 @@ set(DEPS ${CMAKE_CURRENT_SOURCE_DIR}/deps)
 set(PY ${CMAKE_CURRENT_SOURCE_DIR}/../python)
 
 include_directories(${RUNTIME} ${RUNTIME}/nvn ${STB} ${IMGUI} ${IMGUI}/backends ${DEPS}/include)
+# (as the Makefile's -isystem third_party: the vendored vma/vk_mem_alloc.h)
+include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 # ------------------------------------------------------------------ GAMELIB_ID
 # The same hash runtime/gamebuild.c and the generated library share (the Makefile computes it
@@ -25,8 +27,8 @@ set(GAMELIB_ID_FILES
     ${PY}/passes.py ${PY}/patches.py ${PY}/simd_c.py
     ${TOOLS}/gamelib_entry.c
     ${RUNTIME}/hle/hle_symbols.txt
-    ${RUNTIME}/cpu.h ${RUNTIME}/simd.h ${RUNTIME}/simd_fp.h ${RUNTIME}/gamelib.h
-    ${PY}/layout.py)
+    ${RUNTIME}/cpu.h ${RUNTIME}/simd.h ${RUNTIME}/simd_fp.h ${RUNTIME}/simd_softfma.h ${RUNTIME}/gamelib.h
+    ${PY}/layout.py ${PY}/game_sites.py)
 set(GENFLAGS_ID "-O1 -fno-strict-aliasing -fvisibility=hidden -Iruntime")
 set(GAMELIB_ID_INPUT "${CMAKE_BINARY_DIR}/gamelib_id_input")
 file(WRITE "${GAMELIB_ID_INPUT}" "")
