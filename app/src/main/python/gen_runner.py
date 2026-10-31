@@ -25,7 +25,9 @@ def run(argv, log_path):
 
 def _run(argv, log_path):
     """Run gen.py with argv (argv[0] is 'gen.py'), capturing output into log_path."""
-    with open(log_path, "ab", buffering=0) as log:
+    # text, line-buffered: gamebuild.c reads the ": progress N/M files K" lines while it runs (a binary
+    # file refused every str write, silently - no chunk was ever compiled)
+    with open(log_path, "a", encoding="utf-8", errors="replace", buffering=1) as log:
 
         class _Tee:
             def __init__(self, *streams):
