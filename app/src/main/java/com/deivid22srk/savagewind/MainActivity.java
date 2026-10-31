@@ -77,6 +77,10 @@ public class MainActivity extends SDLActivity {
             // the generator's ctypes packages load their C library from here (build_deps_android.sh)
             Os.setenv("LIBUNICORN_PATH", libdir, true);
             Os.setenv("LIBCAPSTONE_PATH", libdir, true);
+            // the on-device link (runtime/gamebuild.c): the shipped sysroot / compiler runtime (copyAssets)
+            // and libmain.so, so the game code library resolves the runtime functions it calls
+            Os.setenv("SAVAGEWIND_LINK_FLAGS", "--sysroot=" + root.getAbsolutePath() + "/sysroot -resource-dir="
+                      + root.getAbsolutePath() + "/clangrt -L" + libdir + " -lmain", true);
             // (tests, over adb) SAVAGEWIND_* string extras become environment variables, e.g.
             // am start -n <pkg>/.MainActivity --es SAVAGEWIND_LAUNCHER_SETUP /storage/emulated/0/SavageWind
             Bundle extras = getIntent() != null ? getIntent().getExtras() : null;
@@ -85,9 +89,14 @@ public class MainActivity extends SDLActivity {
                     if (k.startsWith("SAVAGEWIND_") && extras.get(k) instanceof String) Os.setenv(k, extras.getString(k), true);
             File bin = new File(getFilesDir(), "bin");
             bin.mkdirs();
+            // made anew each start: an update moves nativeLibraryDir (a new random path), and the old
+            // link then dangled (symlink() failed with EEXIST, the linker was never found)
+            File lld = new File(bin, "ld.lld");
+            lld.delete();
             try {
-                Os.symlink(libdir + "/libld.lld.so", new File(bin, "ld.lld").getAbsolutePath());
-            } catch (Exception ignored) {  // exists from an earlier run
+                Os.symlink(libdir + "/libld.lld.so", lld.getAbsolutePath());
+            } catch (Exception e) {
+                bootLog("env: ld.lld link FAILED: " + e);
             }
             String path = System.getenv("PATH");
             Os.setenv("PATH", bin.getAbsolutePath() + ":" + (path != null ? path : ""), true);
@@ -166,6 +175,8 @@ public class MainActivity extends SDLActivity {
         copyTree("clang-include", new File(root, "gamelib-src"));
         // into the data root itself: rt_resource() looks for FiraSans-*.ttf / NotoSansThai-*.ttf beside the "exe"
         copyTree("fonts", root);
+        copyTree("sysroot", new File(root, "sysroot"));  // (the on-device link: build_deps_android.sh)
+        copyTree("clangrt", new File(root, "clangrt"));
         copyOne("icon.png", new File(root, "icon.png"));
     }
 

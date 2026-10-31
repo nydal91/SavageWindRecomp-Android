@@ -551,6 +551,12 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         {
             compiler(&a, &t);
             add_split(&a, GAMELIB_SHARED);
+#ifdef __ANDROID__
+            // no NDK on the device: the minimal sysroot + compiler runtime the app ships, and libmain.so,
+            // whose runtime functions the game code calls (Android's linker resolves a dlopen'd library's
+            // symbols only through its own DT_NEEDED: MainActivity sets SAVAGEWIND_LINK_FLAGS)
+            if (getenv("SAVAGEWIND_LINK_FLAGS")) add_split(&a, getenv("SAVAGEWIND_LINK_FLAGS"));
+#endif
             add(&a, "-o");
             add(&a, tmp);
             add(&a, at);

@@ -42,3 +42,5 @@ __pycache__/
 app/src/main/python/unicorn/
 app/src/main/python/capstone/
 app/.cxx/
+app/src/main/assets/sysroot/
+app/src/main/assets/clangrt/

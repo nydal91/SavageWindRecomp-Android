@@ -151,6 +151,70 @@ if [ ! -f "$JNI/libclang.so" ]; then
     mkdir -p "$ASSETS/clang-include" && cp "$RES"/*.h "$ASSETS/clang-include/"
 fi
 
+# ---- the compiler's whole library closure. libLLVM.so needs more Termux libraries (libffi,
+# libxml2, zlib, zstd, ...) and those need others: every one goes into nativeLibraryDir. An APK
+# only carries lib*.so files, so versioned names (libz.so.1, libxml2.so.16) are renamed
+# (libz_1.so, libxml2_16.so) and the NEEDED entries / sonames rewritten with patchelf.
+if [ ! -f "$JNI/.toolchain-closed" ]; then
+    PATCHELF=$(command -v patchelf || true)
+    if [ -z "$PATCHELF" ]; then
+        [ -x "$ROOT/build/pytools/bin/patchelf" ] || {
+            python3 -m venv "$ROOT/build/pytools" && "$ROOT/build/pytools/bin/pip" install -q patchelf==0.19.1.0; }
+        PATCHELF=$ROOT/build/pytools/bin/patchelf
+    fi
+    T=$W/toolchain
+    U=$T/root/data/data/com.termux/files/usr
+    POOL=https://packages.termux.dev/apt/termux-main/pool/main
+    termux_deb() {  # pool dir, package name -> extracted into the toolchain root
+        local f
+        f=$(curl -fsSL "$POOL/$1/" | grep -oE "\"$2_[^\"]+_aarch64\.deb\"" | tr -d '"' | sort -V | tail -1)
+        [ -n "$f" ] || { echo "no Termux package $2"; exit 1; }
+        curl -fsSL -o "$S/$f" "$POOL/$1/$f" && dpkg -x "$S/$f" "$T/root"
+    }
+    [ -d "$U/lib" ] || { echo "the Termux toolchain root is gone: rm $JNI/libclang.so and run again"; exit 1; }
+    for p in libf/libffi libx/libxml2 z/zlib z/zstd libi/libiconv libl/liblzma; do termux_deb "$p" "${p#*/}"; done
+    system_lib() { case $1 in libc.so|libm.so|libdl.so|liblog.so|libz.so|libandroid.so|ld-android.so) return 0;; esac; return 1; }
+    apk_name() { case $1 in *.so) echo "$1";; *) local b=${1%%.so.*} v=${1#*.so.}; echo "${b}_${v//./_}.so";; esac; }
+    for round in 1 2 3 4 5 6 7 8; do
+        added=0
+        for f in "$JNI"/*.so; do
+            for lib in $($READELF -d "$f" | grep NEEDED | grep -oE '\[[^]]+\]' | tr -d '[]'); do
+                system_lib "$lib" && continue
+                new=$(apk_name "$lib")
+                [ "$new" != "$lib" ] && "$PATCHELF" --replace-needed "$lib" "$new" "$f"
+                [ -f "$JNI/$new" ] && continue
+                src=$(find "$U/lib" -maxdepth 1 -name "$lib" | head -1)
+                [ -n "$src" ] || { echo "$lib (needed by $(basename "$f")) is in no Termux package fetched"; exit 1; }
+                cp -L "$src" "$JNI/$new" && chmod 644 "$JNI/$new"
+                "$PATCHELF" --set-soname "$new" "$JNI/$new"
+                added=1
+            done
+        done
+        [ $added = 0 ] && break
+    done
+    touch "$JNI/.toolchain-closed"
+fi
+
+# ---- what the on-device link needs (clang -shared): a minimal sysroot from this NDK - the shared
+# library start/end objects and the libc / libm / libdl / liblog stubs - and a resource dir with
+# the compiler runtime (builtins, libunwind) where Termux's clang looks for it
+# (lib/aarch64-unknown-linux-android24/). Shipped as assets, unpacked into the data root
+# (MainActivity), passed through SAVAGEWIND_LINK_FLAGS (runtime/gamebuild.c).
+if [ ! -f "$ASSETS/sysroot/usr/lib/aarch64-linux-android/crtbegin_so.o" ]; then
+    NLIB=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android
+    NRT=$(dirname "$(find "$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang" -name 'libclang_rt.builtins-aarch64-android.a' | head -1)")
+    [ -n "$NRT" ] && [ -d "$NLIB/$API" ] || { echo "NDK sysroot / compiler runtime not found"; exit 1; }
+    SR=$ASSETS/sysroot/usr/lib/aarch64-linux-android
+    rm -rf "$ASSETS/sysroot" "$ASSETS/clangrt" && mkdir -p "$SR"
+    for f in crtbegin_so.o crtend_so.o crt_pad_segment.o libc.so libm.so libdl.so liblog.so; do
+        [ -f "$NLIB/$API/$f" ] && cp "$NLIB/$API/$f" "$SR/"
+    done
+    cp "$NRT/aarch64/libunwind.a" "$SR/"
+    RD=$ASSETS/clangrt/lib/aarch64-unknown-linux-android24
+    mkdir -p "$RD"
+    cp "$NRT/libclang_rt.builtins-aarch64-android.a" "$RD/libclang_rt.builtins.a"
+fi
+
 # ---- the generator's Python packages: unicorn + capstone (tools/gen.py, tools/analyze.py).
 # PyPI has no Android wheels, but both are ctypes wrappers around one C library: the library is
 # cross-built here (ARM64 only, all gen.py uses) into nativeLibraryDir, and the pure-Python
