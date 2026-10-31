@@ -81,6 +81,9 @@ android {
 chaquopy {
     defaultConfig {
         version '3.13'
+        // unicorn / capstone find their C library through importlib.resources: they need real
+        // files on disk, not Chaquopy's in-APK asset paths (unicorn's loader fails on AssetPath)
+        extractPackages 'unicorn', 'capstone'
         pip {
             install 'lz4==4.3.3'   // the Chaquopy repository's lz4 for cp313 / android_24
         }
