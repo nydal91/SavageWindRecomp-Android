@@ -82,7 +82,7 @@ public class MainActivity extends SDLActivity {
             // the on-device link (runtime/gamebuild.c): the shipped sysroot / compiler runtime (copyAssets)
             // and libmain.so, so the game code library resolves the runtime functions it calls
             Os.setenv("SAVAGEWIND_LINK_FLAGS", "--sysroot=" + root.getAbsolutePath() + "/sysroot -resource-dir="
-                      + root.getAbsolutePath() + "/clangrt -L" + libdir + " -lmain", true);
+                      + root.getAbsolutePath() + "/clangrt -L" + libdir + " -lmain -lm", true);
             // (tests, over adb) SAVAGEWIND_* string extras become environment variables, e.g.
             // am start -n <pkg>/.MainActivity --es SAVAGEWIND_LAUNCHER_SETUP /storage/emulated/0/SavageWind
             Bundle extras = getIntent() != null ? getIntent().getExtras() : null;
