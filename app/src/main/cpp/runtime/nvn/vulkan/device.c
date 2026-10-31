@@ -982,6 +982,25 @@ static void pt_retire(void) {
 }
 
 #ifdef __ANDROID__
+// Android destroys the window's surface whenever another activity covers the app (the folder picker,
+// the home screen): no frame is drawn while in the background, and on return the VkSurface and the
+// swapchain are made anew (the old surface is lost: presenting to it, the driver crashed).
+static _Atomic int sw_background, sw_surface_lost;
+static bool sw_app_events(void *ud, SDL_Event *e) {
+    (void)ud;
+    switch (e->type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_BACKGROUND: atomic_store(&sw_background, 1); break;
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+        atomic_store(&sw_surface_lost, 1);
+        atomic_store(&sw_background, 0);
+        break;
+    default: break;
+    }
+    return true;
+}
+#endif
+#ifdef __ANDROID__
 // SUBOPTIMAL there means only "not pre-rotated": the swapchain is IDENTITY on purpose (create_swapchain) and the
 // compositor rotates, so every present said it and the swapchain was rebuilt each frame. Out of date still rebuilds.
 #define SC_STALE(r) ((r) == VK_ERROR_OUT_OF_DATE_KHR)
@@ -1021,7 +1040,10 @@ static void *present_thread(void *arg) {
         pthread_mutex_unlock(&pres_m);
         VkResult r = queue_present(g_vk.present_queue, &pi);
         if (SC_STALE(r)) atomic_store(&pres_stale, 1);
-        else if (r != VK_SUCCESS) { static int n; if (n++ < 5) LOG("[vk] present failed: %d\n", r); }
+#ifdef __ANDROID__
+        if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&sw_surface_lost, 1);
+#endif
+        else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { static int n; if (n++ < 5) LOG("[vk] present failed: %d\n", r); }
         pthread_mutex_lock(&pres_m);
         pres_busy = false;
         pthread_cond_broadcast(&pres_cv);
@@ -1052,6 +1074,9 @@ static bool present_image(uint32_t img, VkSemaphore sem) {
         VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem,
                                .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
         VkResult r = queue_present(g_vk.queue, &pi);
+#ifdef __ANDROID__
+        if (r == VK_ERROR_SURFACE_LOST_KHR) atomic_store(&sw_surface_lost, 1);
+#endif
         return !SC_STALE(r);
     }
     pthread_mutex_lock(&pres_m);
@@ -1105,6 +1130,28 @@ bool vk_frame_begin(const float clear[4]) {
     SDL_GetWindowSizeInPixels(window, &w, &h);
     // minimised (Windows keeps the window's size then, but its surface is 0 x 0: every acquire was out of date)
     if (!w || !h || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)) return false;
+#ifdef __ANDROID__
+    if (atomic_load(&sw_background)) return false;
+    if (atomic_exchange(&sw_surface_lost, 0)) {
+        vk_present_idle();
+        pt_retire();
+        vkDeviceWaitIdle(g_vk.dev);
+        for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+        g_vk.sc_count = 0;
+        if (g_vk.swapchain) vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL);
+        g_vk.swapchain = VK_NULL_HANDLE;
+        vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
+        g_vk.surface = VK_NULL_HANDLE;
+        if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) {
+            LOG("[vk] surface again: %s (next frame)\n", SDL_GetError());
+            atomic_store(&sw_surface_lost, 1);
+            return false;
+        }
+        LOG("[vk] back in the foreground: surface and swapchain made again\n");
+        create_swapchain();
+        if (!g_vk.swapchain) return false;
+    }
+#endif
     uint64_t tp = SDL_GetTicksNS();
     vk_present_idle();  // (the swapchain is externally synchronized: no acquire while the present thread presents)
     g_present_split[4] += SDL_GetTicksNS() - tp;
@@ -1549,6 +1596,9 @@ void ui_window_init(void) {
     winsize_apply(window);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+#ifdef __ANDROID__
+    SDL_AddEventWatch(sw_app_events, NULL);
+#endif
     pick_device();
     create_device();
     create_swapchain();

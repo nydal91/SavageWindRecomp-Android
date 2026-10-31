@@ -57,6 +57,7 @@ public class MainActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        sContext = this;  // the pickers (pickFolder / pickFile) and Swgen use it: it was never set
         File root = getExternalFilesDir(null);
         if (root == null) root = getFilesDir();
         sBootLog = new File(root, "bootlog.txt");
