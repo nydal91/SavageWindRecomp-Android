@@ -77,6 +77,12 @@ public class MainActivity extends SDLActivity {
             // the generator's ctypes packages load their C library from here (build_deps_android.sh)
             Os.setenv("LIBUNICORN_PATH", libdir, true);
             Os.setenv("LIBCAPSTONE_PATH", libdir, true);
+            // (tests, over adb) SAVAGEWIND_* string extras become environment variables, e.g.
+            // am start -n <pkg>/.MainActivity --es SAVAGEWIND_LAUNCHER_SETUP /storage/emulated/0/SavageWind
+            Bundle extras = getIntent() != null ? getIntent().getExtras() : null;
+            if (extras != null)
+                for (String k : extras.keySet())
+                    if (k.startsWith("SAVAGEWIND_") && extras.get(k) instanceof String) Os.setenv(k, extras.getString(k), true);
             File bin = new File(getFilesDir(), "bin");
             bin.mkdirs();
             try {

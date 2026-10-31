@@ -5,10 +5,25 @@
 # ": exit N" line this runner writes).
 
 import sys
+import threading
 import traceback
+
+# gamebuild.c starts the generator for every module at once (separate processes on the desktop).
+# Here they share one interpreter: sys.argv / sys.stdout / sys.stderr are global and the GIL lets
+# one run at a time anyway, so runs take turns, each with fresh generator modules (as a new
+# process would have) - unicorn / capstone stay loaded.
+_lock = threading.Lock()
+_GEN_MODULES = ("gen", "lifter", "analyze", "nso", "passes", "patches", "simd_c", "layout", "game_sites")
 
 
 def run(argv, log_path):
+    with _lock:
+        for m in _GEN_MODULES:
+            sys.modules.pop(m, None)
+        return _run(argv, log_path)
+
+
+def _run(argv, log_path):
     """Run gen.py with argv (argv[0] is 'gen.py'), capturing output into log_path."""
     with open(log_path, "ab", buffering=0) as log:
 

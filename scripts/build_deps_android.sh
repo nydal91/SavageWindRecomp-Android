@@ -166,6 +166,11 @@ if [ ! -f "$JNI/libunicorn.so" ] || [ ! -f "$PYDIR/unicorn/__init__.py" ]; then
     cmake --build "$W/unicorn/build" -j"$JOBS"
     cp -L "$W/unicorn/build/libunicorn.so" "$JNI/libunicorn.so"
     rm -rf "$PYDIR/unicorn" && cp -R "$W/unicorn/unicorn" "$PYDIR/unicorn"
+    # Chaquopy imports from the APK: importlib.resources gives an AssetPath, which pathlib.Path()
+    # refuses (TypeError at import). As a str it is just a path that holds no library: skipped.
+    sed -i 's/tuple(Path(loc) for loc in lib_locations if loc is not None)/tuple(Path(str(loc)) for loc in lib_locations if loc is not None)/' \
+        "$PYDIR/unicorn/unicorn_py3/unicorn.py"
+    grep -q 'Path(str(loc))' "$PYDIR/unicorn/unicorn_py3/unicorn.py"
 fi
 if [ ! -f "$JNI/libcapstone.so" ] || [ ! -f "$PYDIR/capstone/__init__.py" ]; then
     fetch https://files.pythonhosted.org/packages/39/01/6516910f546fbb996068207b9dd0229b14bc8dae223114d5e0e27d3cad11/capstone-5.0.9.tar.gz \
