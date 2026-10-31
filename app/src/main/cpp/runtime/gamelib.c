@@ -154,7 +154,42 @@ bool gamelib_present(const char *game_dir) {
     return false;
 }
 
+#ifdef __ANDROID__
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+// An app's linker namespace loads code from /data only, not from shared storage (/storage/emulated, where the
+// data root is): the library is copied into the app's code cache (SAVAGEWIND_CODE_DIR, MainActivity) and loaded
+// from there - again only when its size or time changed.
+static const char *android_loadable(const char *path) {
+    static char dst[1100];
+    const char *dir = getenv("SAVAGEWIND_CODE_DIR");
+    struct stat a, b;
+    if (!dir || !*dir || stat(path, &a) != 0) return path;
+    snprintf(dst, sizeof dst, "%s/" GAMELIB_NAME, dir);
+    if (stat(dst, &b) == 0 && b.st_size == a.st_size && b.st_mtime >= a.st_mtime) return dst;
+    char tmp[1110];
+    snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+    int in = open(path, O_RDONLY), out = in >= 0 ? open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0700) : -1;
+    bool ok = in >= 0 && out >= 0;
+    static char buf[1 << 20];
+    for (ssize_t n; ok && (n = read(in, buf, sizeof buf)) != 0;)
+        ok = n > 0 && write(out, buf, (size_t)n) == n;
+    if (in >= 0) close(in);
+    if (out >= 0 && close(out) != 0) ok = false;
+    if (!ok || rename(tmp, dst) != 0) {
+        unlink(tmp);
+        LOG("[gamelib] can't copy %s into %s: loading it in place\n", path, dir);
+        return path;
+    }
+    return dst;
+}
+#endif
+
 static const GameLibTables *open_lib(const char *path) {
+#ifdef __ANDROID__
+    path = android_loadable(path);
+#endif
 #ifdef _WIN32
     HMODULE h = LoadLibraryA(path);
     if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }

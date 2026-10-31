@@ -77,6 +77,8 @@ public class MainActivity extends SDLActivity {
             // the generator's ctypes packages load their C library from here (build_deps_android.sh)
             Os.setenv("LIBUNICORN_PATH", libdir, true);
             Os.setenv("LIBCAPSTONE_PATH", libdir, true);
+            // the game code library is loaded from here: native code can't load from shared storage
+            Os.setenv("SAVAGEWIND_CODE_DIR", getCodeCacheDir().getAbsolutePath(), true);
             // the on-device link (runtime/gamebuild.c): the shipped sysroot / compiler runtime (copyAssets)
             // and libmain.so, so the game code library resolves the runtime functions it calls
             Os.setenv("SAVAGEWIND_LINK_FLAGS", "--sysroot=" + root.getAbsolutePath() + "/sysroot -resource-dir="
