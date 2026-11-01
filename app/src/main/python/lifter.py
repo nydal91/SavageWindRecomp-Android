@@ -701,6 +701,13 @@ def emit_asm_batch(batch):
         words.append(w)
     lines = []
     ins = ['"r"(c)']
+    used = set(gmap.values()) | {s for s, _ in consts}
+    ft = None  # the NZCV temporary: a scratch register the batch doesn't map (x16 was mapped too once 8 guest registers
+    if flags:  # were: the flags load overwrote that guest value - a crash in BotW 1.9.0 f_7001416344, x16 = 0x60000000)
+        free = [r for r in SCRATCH if r not in used]
+        if not free:
+            raise Unsupported('scratch exhausted')
+        ft = free[-1]
     for g, s in gmap.items():
         off = OFF_SP if g == 'sp' else OFF_X + 8 * g
         lines.append(f'ldr x{s}, [%0, #{off}]')
@@ -710,19 +717,19 @@ def emit_asm_batch(batch):
     for v in sorted(vregs):
         lines.append(f'ldr q{v}, [%0, #{OFF_V + 16 * v}]')
     if flags:
-        lines.append(f'ldr x16, [%0, #{OFF_NZCV}]')
-        lines.append('msr nzcv, x16')
+        lines.append(f'ldr x{ft}, [%0, #{OFF_NZCV}]')
+        lines.append(f'msr nzcv, x{ft}')
     lines += [f'.inst 0x{x:08x}' for x in words]
     if flags:
-        lines.append('mrs x16, nzcv')
-        lines.append(f'str x16, [%0, #{OFF_NZCV}]')
+        lines.append(f'mrs x{ft}, nzcv')
+        lines.append(f'str x{ft}, [%0, #{OFF_NZCV}]')
     for v in sorted(vregs):
         lines.append(f'str q{v}, [%0, #{OFF_V + 16 * v}]')
     for g, s in gmap.items():
         off = OFF_SP if g == 'sp' else OFF_X + 8 * g
         lines.append(f'str x{s}, [%0, #{off}]')
     clob = [f'"v{v}"' for v in sorted(vregs)]
-    clob += [f'"x{s}"' for s in sorted(set(gmap.values()) | {s for s, _ in consts} | ({16} if flags else set()))]
+    clob += [f'"x{s}"' for s in sorted(used | ({ft} if flags else set()))]
     clob += ['"cc"', '"memory"']
     body = '\\n\\t'.join(lines)
     return f'__asm__ volatile("{body}" :: {", ".join(ins)} : {", ".join(clob)});'
