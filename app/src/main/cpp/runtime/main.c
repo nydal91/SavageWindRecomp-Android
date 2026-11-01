@@ -5,6 +5,9 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __ANDROID__
+#include <unistd.h>  // (_exit)
+#endif
 
 #include "gamelib.h"
 #include "paths.h"
@@ -70,15 +73,18 @@ static void rtld_fini_main(Cpu *c) {
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
-// (Android: no re-exec inside an app - the user closes and reopens it. A window that never fits
-// means a 39-bit-address-space device, which the game needs more than 256 GB of user VA for.)
+// (Android: no re-exec inside an app. App processes are forked from zygote and inherit its layout,
+// so on a 39-bit-VA device zygote's own libraries and allocator reservations can sit in the window
+// for the whole boot: only a reboot gives a new layout. The constructor can't show anything, and
+// exit() here runs atexit handlers of modules already unloaded (Magisk Zygisk's -> SIGSEGV and a
+// relaunch loop), so it only records the failure; sw_main shows it and leaves with _exit.)
+#ifdef __ANDROID__
+static bool g_guest_space_busy;
+#endif
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
     if (plat_reserve_guest(GUEST_LO, GUEST_HI)) return;
 #ifdef __ANDROID__
-    fprintf(stderr, "FATAL: guest address range %llx-%llx is not free. Close Savage Wind completely and open it "
-                    "again; if it happens every time, this device doesn't have the address space (48-bit VA) the "
-                    "game needs.\n", (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
-    exit(1);
+    g_guest_space_busy = true;
 #else
     const char *tries = getenv("SAVAGEWIND_REEXEC");
     int n = tries ? atoi(tries) : 0;
@@ -332,6 +338,21 @@ bool launcher_config_key_held(void);  // (macOS: Option held while the app opens
 int sw_main(int argc, char **argv) {  // the app's SDL_main (cpp/android/android_main.c)
 #else
 int main(int argc, char **argv) {
+#endif
+#ifdef __ANDROID__
+    if (g_guest_space_busy) {
+        char text[600];
+        snprintf(text, sizeof text,
+                 "The memory range the game needs (%llx-%llx) is already in use by Android on this boot.\n\n"
+                 "Restart the phone and open Savage Wind again. If it keeps happening after several restarts, "
+                 "this device doesn't have the address space layout the game needs.",
+                 (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
+        fprintf(stderr, "FATAL: guest address range %llx-%llx is not free\n", (unsigned long long)GUEST_LO,
+                (unsigned long long)GUEST_HI);
+        fflush(stderr);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Savage Wind", text, NULL);
+        _exit(1);  // (not exit: see reserve_guest_space)
+    }
 #endif
     plat_init();
 #ifdef _WIN32
