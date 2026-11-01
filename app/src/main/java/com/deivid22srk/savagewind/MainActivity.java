@@ -234,6 +234,7 @@ public class MainActivity extends SDLActivity {
         copyTree("fonts", root);
         copyTree("sysroot", new File(root, "sysroot"));  // (the on-device link: build_deps_android.sh)
         copyTree("clangrt", new File(root, "clangrt"));
+        copyTree("colour-luts", new File(root, "colour-luts"));  // (Video > Colour: runtime/color_grade.c)
         copyOne("icon.png", new File(root, "icon.png"));
     }
 

@@ -103,6 +103,36 @@ target_link_libraries(main PRIVATE
     adrenotools
     ${android-lib} ${log-lib} ${z-lib})
 
+# SW_SOURCE: the source in the log's first line (runtime/main.c), as upstream's Makefile has it
+execute_process(COMMAND git log -1 "--format=commit %h, tree %t" WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                OUTPUT_VARIABLE SW_SOURCE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT SW_SOURCE)
+    set(SW_SOURCE "unknown")
+endif()
+set_property(SOURCE ${RUNTIME}/main.c APPEND PROPERTY COMPILE_DEFINITIONS "SW_SOURCE=\"android, ${SW_SOURCE}\"")
+
+# AMD FidelityFX SDK 1.1.4 (third_party/FidelityFX, MIT): FSR 3 frame interpolation, optical flow and the FSR 3
+# upscaler on its Vulkan backend (runtime/nvn/vulkan/framegen.cpp, fsr3.cpp), as upstream's Makefile builds them; the
+# shaders are prebuilt SPIR-V (third_party/FidelityFX/spirv).
+set(FFX ${CMAKE_CURRENT_SOURCE_DIR}/third_party/FidelityFX)
+file(GLOB FFX_SHARED ${FFX}/sdk/src/shared/*.cpp)
+add_library(ffx STATIC
+    ${FFX}/sdk/src/components/frameinterpolation/ffx_frameinterpolation.cpp
+    ${FFX}/sdk/src/components/opticalflow/ffx_opticalflow.cpp
+    ${FFX}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp
+    ${FFX}/sdk/src/backends/vk/ffx_vk.cpp
+    ${FFX_SHARED})
+set(FFX_INC ${FFX}/sdk/include ${FFX}/sdk/src/components ${FFX}/sdk/src/shared ${FFX}/sdk/src/backends/shared)
+target_include_directories(ffx BEFORE PRIVATE ${FFX_INC} ${FFX}/sdk/include/FidelityFX/gpu)
+target_compile_options(ffx PRIVATE -w -include ${FFX}/ffx_compat.h)
+set_target_properties(ffx PROPERTIES POSITION_INDEPENDENT_CODE ON)
+string(REPLACE ";" " -I" FFX_INC_FLAGS "-I${FFX_INC}")
+set_source_files_properties(${RUNTIME}/nvn/vulkan/fsr3.cpp PROPERTIES
+    COMPILE_FLAGS "-DSW_FSR3=1 -include ${FFX}/ffx_compat.h ${FFX_INC_FLAGS}")
+set_source_files_properties(${RUNTIME}/nvn/vulkan/framegen.cpp PROPERTIES
+    COMPILE_FLAGS "-include ${FFX}/ffx_compat.h ${FFX_INC_FLAGS} -I${FFX}/spirv")
+target_link_libraries(main PRIVATE ffx)
+
 # Installed GPU drivers (Mesa Turnip...): libadrenotools loads them, android/vk_dispatch.c. Its hook libraries
 # (libmain_hook.so...) are packaged too: adrenotools loads them from nativeLibraryDir.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/libadrenotools)

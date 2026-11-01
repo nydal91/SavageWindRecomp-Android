@@ -13,8 +13,8 @@ android {
         // 28: posix_spawn (the compiler / generator children), like the desktop flow
         minSdk 28
         targetSdk 35
-        versionCode 3
-        versionName '0.3.1-alpha.3-android.2'
+        versionCode 4
+        versionName '0.4.1-alpha.4-android.1'
 
         ndk {
             abiFilters 'arm64-v8a'

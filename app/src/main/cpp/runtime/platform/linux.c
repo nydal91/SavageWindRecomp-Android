@@ -37,12 +37,20 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
 }
 
 // Fresh zero pages over the whole window (the old ones are released at once).
+long plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, size_t max) { return -1; }  // (not tracked)
+int plat_any_written(uint64_t addr, uint64_t size) { return -1; }
+
 bool plat_reset_guest(uint64_t lo, uint64_t hi) {
     return mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED,
                 -1, 0) == (void *)(uintptr_t)lo;
 }
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
+
+void plat_decommit(uint64_t addr, uint64_t size) {
+    uint64_t a = (addr + 0xFFF) & ~0xFFFull, e = (addr + size) & ~0xFFFull;  // (whole pages inside the range only)
+    if (e > a) madvise((void *)(uintptr_t)a, e - a, MADV_DONTNEED);  // (private anonymous memory: freed, reads as zero)
+}
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     int p = prot == PLAT_PROT_NONE ? PROT_NONE : prot == PLAT_PROT_READ ? PROT_READ : PROT_READ | PROT_WRITE;
@@ -60,6 +68,8 @@ void plat_sleep_until_ns(uint64_t t) {
     struct timespec ts = {.tv_sec = (time_t)(t / 1000000000u), .tv_nsec = (long)(t % 1000000000u)};
     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
 }
+
+void plat_cpu_placement(void) {}  // (one logical processor per core: measured on Windows only)
 
 // Real-time scheduling where the user may have it (rtkit / limits.conf), else just a higher priority: keeps the
 // vsync thread on time while the guest threads load every core.
@@ -90,6 +100,11 @@ static void log_to_file_without_terminal(void) {
     mkdir(dir, 0755);
     snprintf(g_log_path, sizeof g_log_path, "%s/savagewind.log", dir);
     bool append = getenv("SAVAGEWIND_LOG_APPEND") != NULL;
+    if (!append) {  // the last run's log stays as savagewind.prev.log: opening again after a failed setup kept nothing of it
+        char prev[1100];
+        snprintf(prev, sizeof prev, "%s/savagewind.prev.log", dir);
+        rename(g_log_path, prev);
+    }
     if (!freopen(g_log_path, append ? "a" : "w", stderr)) { g_log_path[0] = 0; return; }
     dup2(STDERR_FILENO, STDOUT_FILENO);
     setenv("SAVAGEWIND_LOG_APPEND", "1", 1);
@@ -156,7 +171,24 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     char text[1200];
-    snprintf(text, sizeof text, "Savage Wind stopped because of an error.\n\nDetails: %s", g_log_path);
+    // (the GPU out of memory, vk.h VK_CHECK: the reason a player can act on, #117)
+    bool oom = false;
+    FILE *f = fopen(g_log_path, "rb");
+    if (f) {
+        static char tail[8192];
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0, SEEK_SET);
+        tail[fread(tail, 1, sizeof tail - 1, f)] = 0;
+        fclose(f);
+        oom = strstr(tail, "FATAL: the GPU ran out of memory") != NULL;
+    }
+    snprintf(text, sizeof text, "Savage Wind stopped because of an error.%s\n\nDetails: %s",
+             oom ? "\n\nThe graphics card ran out of memory. Integrated graphics share the PC's RAM, and Savage Wind keeps "
+                   "the game's 3 GB of memory available to the GPU: with integrated graphics it needs 16 GB of RAM. Close "
+                   "other programs and lower Video > Shadow resolution and the upscaler quality."
+                 : "",
+             g_log_path);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Savage Wind", text, NULL);
 }
 
@@ -247,7 +279,7 @@ int plat_proc_wait(PlatProc p, bool block) {
     pid_t r = waitpid((pid_t)p, &st, block ? 0 : WNOHANG);
     if (r == 0) return -1;
     if (r < 0) return 255;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 128 + (WTERMSIG(st) & 127) : 255;  // (as a shell: 137 = killed)
 }
 
 static int rm_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
