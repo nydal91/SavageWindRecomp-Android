@@ -36,6 +36,9 @@
 extern "C" {
 #include "../paths.h"
 #include "../services/save_convert.h"
+#ifdef __ANDROID__
+#include "../platform.h"
+#endif
 SDL_Window *ui_window(void);
 #ifdef __APPLE__
 void *ui_metal_device(void);
@@ -196,7 +199,14 @@ void *worker(void *p) {
             r.code = SC_LINKED;
         } else if (sc_format_load((g_game_root + "/romfs/Pack/Bootup.pack").c_str(), &fmt, &r) == SC_OK) {
             ScCancel cancel = {cancel_work, NULL};
-            sc_convert_cancel(w->src.c_str(), stage, fmt, 0, &cancel, &st, &r);
+#ifdef __ANDROID__
+            // A Switch save (Yuzu / Ryujinx / a console dump) is taken too: the save folder lives in Android/data,
+            // where the player can't copy files by hand. It is brought to the game's revision like a Wii U one.
+            const unsigned flags = SC_ALLOW_SWITCH;
+#else
+            const unsigned flags = 0;
+#endif
+            sc_convert_cancel(w->src.c_str(), stage, fmt, flags, &cancel, &st, &r);
             sc_format_free(fmt);
         }
         g_code = r.code, g_detail = r.detail;
@@ -295,6 +305,26 @@ std::string shown_path(const std::string &p) {
     return s;
 }
 
+// Where an import came from. Android: the save is read from a copy of the picked folder (MainActivity.copyPickedSaves,
+// <cache>/save-import), which holds the picked folder's name in .picked: that is shown in place of the copy.
+std::string source_path(const std::string &root) {
+#ifdef __ANDROID__
+    static const char kCopy[] = "/cache/save-import";
+    size_t at = root.find(kCopy);
+    if (at != std::string::npos) {
+        std::string copy = root.substr(0, at + sizeof kCopy - 1);
+        char label[1024] = "";
+        if (FILE *f = fopen((copy + "/.picked").c_str(), "r")) {
+            size_t n = fread(label, 1, sizeof label - 1, f);
+            label[n] = 0;
+            fclose(f);
+        }
+        if (label[0]) return label + root.substr(copy.size());
+    }
+#endif
+    return shown_path(root);
+}
+
 // "2026-10-03 15:40", or just the day (the same in every language)
 std::string fmt_time(time_t t, bool day_only = false) {
     struct tm tmv;
@@ -382,7 +412,7 @@ void draw_result(int phase) {
     } else if (g_kind == IMPORTED) {
         ImGui::TextColored(gold, "%s", tr("Import finished"));
         ImGui::TextWrapped("%s", fmt("Slots imported: %s", slot_list(g_rep).c_str()).c_str());
-        ImGui::TextDisabled("%s", fmt("From: %s", shown_path(g_rep.root).c_str()).c_str());
+        ImGui::TextDisabled("%s", fmt("From: %s", source_path(g_rep.root).c_str()).c_str());
         ImGui::TextWrapped("%s", fmt("Flags: %u kept, %u set to defaults (not in the old save), %u dropped (not in this game "
                                      "version).", g_rep.kept, g_rep.defaulted, g_rep.dropped).c_str());
         for (int i = 0; i < g_rep.nslots; i++) {  // (per slot: what the older game did not have, and what the new one dropped)
@@ -427,7 +457,7 @@ void draw_confirm(int phase) {
     ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", tr("Import this save?"));
     ImGui::PushTextWrapPos(fminf(ImGui::GetFontSize() * 34, ImGui::GetIO().DisplaySize.x * 0.7f));  // (a small window too)
     ImGui::TextWrapped("%s", fmt("Slots: %s", slot_list(g_rep).c_str()).c_str());
-    ImGui::TextDisabled("%s", fmt("From: %s", shown_path(g_rep.root).c_str()).c_str());
+    ImGui::TextDisabled("%s", fmt("From: %s", source_path(g_rep.root).c_str()).c_str());
     ImGui::Spacing();
     if (g_had_saves) {
         ImGui::TextWrapped("%s", tr("Your current saves are moved to this backup folder first. Nothing is deleted:"));
@@ -503,12 +533,24 @@ void saves_tab_draw(void) {
     opt_begin("##saves", ImGui::GetFontSize() / 34);
     opt_section("Import");
     if (busy) opt_disable_next();
+#ifdef __ANDROID__
+    if (opt_action("Import save...", "",
+                   "Imports a Breath of the Wild save from the Wii U, Cemu or a Switch (Yuzu, Ryujinx...). Choose the "
+                   "folder with the save (for Cemu: .../user/80000001) or a folder above it, on the phone, an SD card or "
+                   "a cloud drive. The Hero's Path, the album and the compendium pictures come along. Nothing changes "
+                   "until you confirm, and your current saves are backed up first.") && !busy &&
+        !g_dialog.exchange(true)) {
+        plat_register_dialog_callback(2, (PlatDialogCallback)folder_picked, NULL);
+        plat_pick_save_folder();
+    }
+#else
     if (opt_action("Import from Wii U / Cemu...", "",
                    "Imports a Breath of the Wild save from the Wii U or from Cemu. Choose the Cemu profile folder "
                    "(.../user/80000001) or any folder above it. The Hero's Path, the album and the compendium pictures "
                    "come along. Nothing changes until you confirm, and your current saves are backed up first.") && !busy &&
         !g_dialog.exchange(true))
         SDL_ShowOpenFolderDialog(folder_picked, NULL, ui_window(), NULL, false);
+#endif
     opt_section("Backup");
     if (busy) opt_disable_next();
     if (opt_action("Back up saves", "",

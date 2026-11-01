@@ -61,10 +61,13 @@ void plat_proc_kill(PlatProc p);             // end it and what it started (then
 bool plat_remove_tree(const char *dir);      // rm -rf
 #ifdef __ANDROID__
 // Android: the start screen's folder / file pickers (SAF, a real path comes back through the
-// registered callback, in SDL's dialog callback shape). which: 0 = folder, 1 = file.
+// registered callback, in SDL's dialog callback shape). which: 0 = folder, 1 = file, 2 = save folder.
 typedef void (*PlatDialogCallback)(void *userdata, const char *const *filelist, int filter);
 void plat_pick_folder(void);
 void plat_pick_file(void);
+// Saves > Import: a folder from any provider; its save files are copied into the app's cache first (the path that
+// comes back is that copy), so Downloads, an SD card or a cloud folder work without file access.
+void plat_pick_save_folder(void);
 void plat_register_dialog_callback(int which, PlatDialogCallback cb, void *userdata);
 #endif
 #ifdef _WIN32

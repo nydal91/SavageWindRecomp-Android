@@ -19,12 +19,12 @@ static JavaVM *g_vm;
 static jobject g_activity;      // global ref (MainActivity)
 static jclass g_clsMain;        // MainActivity
 static jclass g_clsSwgen;       // Swgen
-static jmethodID g_mPickFolder, g_mPickFile, g_mPickDriver;
+static jmethodID g_mPickFolder, g_mPickFile, g_mPickDriver, g_mPickSave;
 static jmethodID g_mSwgenRun;
 
 // Pending dialog callbacks from runtime/ui/launcher.mm (SDL's dialog API is async).
-static SDL_DialogFileCallback g_pending[2];  // 0 = folder (REQ 41), 1 = file (REQ 42)
-static void *g_pending_userdata[2];
+static SDL_DialogFileCallback g_pending[3];  // 0 = folder (REQ 41), 1 = file (REQ 42), 2 = save folder (REQ 44)
+static void *g_pending_userdata[3];
 
 // ------------------------------------------------------------------ helpers
 static JNIEnv *thread_env(void) {
@@ -44,7 +44,7 @@ static void jni_set_context(JNIEnv *env, jclass cls, jobject context) {
 
 static void jni_on_picked(JNIEnv *env, jclass cls, jint code, jstring path) {
     (void)cls;
-    int which = code == 41 ? 0 : code == 42 ? 1 : -1;
+    int which = code == 41 ? 0 : code == 42 ? 1 : code == 44 ? 2 : -1;
     if (which < 0) return;
     SDL_DialogFileCallback cb = g_pending[which];
     g_pending[which] = NULL;
@@ -105,6 +105,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     g_mPickFolder = (*env)->GetStaticMethodID(env, main, "pickFolder", "()V");
     g_mPickFile = (*env)->GetStaticMethodID(env, main, "pickFile", "()V");
     g_mPickDriver = (*env)->GetStaticMethodID(env, main, "pickDriverZip", "()V");
+    g_mPickSave = (*env)->GetStaticMethodID(env, main, "pickSaveFolder", "()V");
 
     jclass swgen = (*env)->FindClass(env, "com/deivid22srk/savagewind/Swgen");
     if (swgen) {
@@ -126,6 +127,17 @@ void plat_pick_file(void) {
     JNIEnv *env = thread_env();
     if (!env || !g_mPickFile) return;
     (*env)->CallStaticVoidMethod(env, g_clsMain, g_mPickFile);
+}
+
+void plat_pick_save_folder(void) {
+    JNIEnv *env = thread_env();
+    if (!env || !g_mPickSave) {  // (the callback still runs: the Saves tab waits for it)
+        SDL_DialogFileCallback cb = g_pending[2];
+        g_pending[2] = NULL;
+        if (cb) cb(g_pending_userdata[2], NULL, 0);
+        return;
+    }
+    (*env)->CallStaticVoidMethod(env, g_clsMain, g_mPickSave);
 }
 
 bool android_pick_driver_zip(void) {
@@ -153,7 +165,7 @@ bool android_driver_install_poll(char *name, size_t name_cap, char *error, size_
 }
 
 void plat_register_dialog_callback(int which, PlatDialogCallback cb, void *userdata) {
-    if (which < 0 || which > 1) return;
+    if (which < 0 || which > 2) return;
     g_pending[which] = (SDL_DialogFileCallback)cb;
     g_pending_userdata[which] = userdata;
 }

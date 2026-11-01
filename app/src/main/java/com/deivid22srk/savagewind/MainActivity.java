@@ -40,6 +40,7 @@ public class MainActivity extends SDLActivity {
     private static final int REQ_PICK_FOLDER = 41;
     private static final int REQ_PICK_FILE = 42;
     private static final int REQ_PICK_DRIVER = 43;
+    private static final int REQ_PICK_SAVE = 44;  // (android_bridge.c: dialog callback 2)
 
     static Context sContext;  // package-private: Swgen reads it
     private static File sBootLog;
@@ -369,8 +370,126 @@ public class MainActivity extends SDLActivity {
         });
     }
 
+    // Saves > Import save (runtime/ui/saves_tab.mm, through android_bridge.c): a folder from any provider. Its save
+    // files (*.sav, *.jpg: the slots, option.sav, the Hero's Path, the album and the compendium) are copied, keeping
+    // the folder layout, into <cache>/save-import, whose path goes to the converter; null when cancelled or failed.
+    public static void pickSaveFolder() {
+        final MainActivity a = (MainActivity) sContext;
+        a.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                a.startActivityForResult(i, REQ_PICK_SAVE);
+            } catch (Exception e) {
+                Toast.makeText(a, "No folder picker on this phone.", Toast.LENGTH_LONG).show();
+                nativeOnPicked(REQ_PICK_SAVE, null);
+            }
+        });
+    }
+
+    private static final long SAVE_COPY_MAX_FILE = 64L << 20, SAVE_COPY_MAX_TOTAL = 512L << 20;
+    private static final int SAVE_COPY_MAX_DEPTH = 10, SAVE_COPY_MAX_VISITS = 50000;
+    private long mSaveCopyBytes;
+    private int mSaveCopyVisits;
+
+    private void copyPickedSaves(final Uri tree) {
+        new Thread(() -> {
+            File out = new File(getCacheDir(), "save-import");
+            deleteTree(out);
+            out.mkdirs();
+            mSaveCopyBytes = 0;
+            mSaveCopyVisits = 0;
+            String err = null;
+            try {
+                String root = DocumentsContract.getTreeDocumentId(tree);
+                copySaveTree(tree, root, out, 0);
+                // the picked folder as the player knows it, for the Saves tab's "From:" (source_path)
+                try (OutputStream os = new FileOutputStream(new File(out, ".picked"))) {
+                    os.write(pickedLabel(tree, root).getBytes("UTF-8"));
+                }
+            } catch (Exception e) {
+                err = e.getMessage() != null ? e.getMessage() : "Could not read that folder.";
+            }
+            bootLog("saves: picked " + tree + " -> " + (err == null ? mSaveCopyBytes + " bytes copied" : err));
+            if (err != null) {
+                deleteTree(out);
+                final String msg = err;
+                runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+                nativeOnPicked(REQ_PICK_SAVE, null);
+            } else {
+                nativeOnPicked(REQ_PICK_SAVE, out.getAbsolutePath());
+            }
+        }).start();
+    }
+
+    // "Download/Saves" for the phone's storage ("primary:Download/Saves"), "SD card: Saves" for another volume, else
+    // the folder's name as its provider shows it
+    private String pickedLabel(Uri tree, String root) {
+        if ("com.android.externalstorage.documents".equals(tree.getAuthority())) {
+            int c = root.indexOf(':');
+            if (c >= 0) {
+                String vol = root.substring(0, c), rel = root.substring(c + 1);
+                if (vol.equals("primary")) return rel.isEmpty() ? "Internal storage" : rel;
+                return "SD card" + (rel.isEmpty() ? "" : ": " + rel);
+            }
+        }
+        try (Cursor c = getContentResolver().query(DocumentsContract.buildDocumentUriUsingTree(tree, root),
+                                                   new String[] {DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getString(0) != null) return c.getString(0);
+        } catch (Exception ignored) {
+        }
+        return "the folder you picked";
+    }
+
+    private void copySaveTree(Uri tree, String docId, File dir, int depth) throws IOException {
+        if (depth > SAVE_COPY_MAX_DEPTH) return;
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
+        String[] cols = {DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                         DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE,
+                         DocumentsContract.Document.COLUMN_LAST_MODIFIED};
+        try (Cursor c = getContentResolver().query(children, cols, null, null, null)) {
+            if (c == null) throw new IOException("Could not read that folder.");
+            while (c.moveToNext()) {
+                if (++mSaveCopyVisits > SAVE_COPY_MAX_VISITS)
+                    throw new IOException("That folder is too big to search. Choose one closer to the save.");
+                String id = c.getString(0), name = c.getString(1), mime = c.getString(2);
+                long size = c.isNull(3) ? -1 : c.getLong(3), mtime = c.isNull(4) ? 0 : c.getLong(4);
+                if (name == null || name.isEmpty() || name.startsWith(".") || name.contains("/")) continue;
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                    File sub = new File(dir, name);
+                    sub.mkdirs();
+                    copySaveTree(tree, id, sub, depth + 1);
+                    continue;
+                }
+                String lower = name.toLowerCase();
+                if (!lower.endsWith(".sav") && !lower.endsWith(".jpg")) continue;
+                if (size > SAVE_COPY_MAX_FILE) continue;
+                Uri doc = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                File to = new File(dir, name);
+                try (InputStream is = getContentResolver().openInputStream(doc); OutputStream os = new FileOutputStream(to)) {
+                    if (is == null) throw new IOException("Could not read " + name + ".");
+                    byte[] buf = new byte[1 << 16];
+                    int k;
+                    while ((k = is.read(buf)) > 0) {
+                        os.write(buf, 0, k);
+                        if ((mSaveCopyBytes += k) > SAVE_COPY_MAX_TOTAL)
+                            throw new IOException("That folder holds too much. Choose one closer to the save.");
+                    }
+                }
+                // the slot list's dates are the files' times (caption.sav: when the game wrote the slot), which the
+                // converter keeps: so the copy keeps them too
+                if (mtime > 0) to.setLastModified(mtime);
+            }
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_PICK_SAVE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) copyPickedSaves(data.getData());
+            else nativeOnPicked(REQ_PICK_SAVE, null);  // (cancelled)
+            return;
+        }
         if (requestCode == REQ_PICK_DRIVER) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) installPickedDriver(data.getData());
             else nativeOnDriverInstalled(null, null);  // (cancelled)
