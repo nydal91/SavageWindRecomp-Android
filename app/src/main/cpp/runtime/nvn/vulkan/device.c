@@ -16,6 +16,9 @@
 #include "../../ui/menu.h"
 #include "../../window_size.h"
 #include "vk.h"
+#ifdef __ANDROID__
+#include "../../../android/vk_dispatch.h"
+#endif
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -204,6 +207,16 @@ static void create_device(void) {
         ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
     }
 #endif
+#ifdef __ANDROID__
+    // the guest heap in AHardwareBuffers (exec.c heap_pieces)
+    g_vk.ahb = has_ext(ep, ne, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) &&
+               has_ext(ep, ne, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+    if (g_vk.ahb) {
+        ext[n_ext++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
+        ext[n_ext++] = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME;
+        if (has_ext(ep, ne, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME)) ext[n_ext++] = VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME;
+    }
+#endif
     VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
     {
         VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
@@ -252,7 +265,10 @@ static void create_device(void) {
 #endif
     // Pipelines linked from shaders compiled apart from the fixed state (exec.c, graphics pipeline libraries), when
     // the driver links them fast. SAVAGEWIND_VK_NO_GPL=1: whole pipelines, as before.
-    bool gpl = !getenv("SAVAGEWIND_VK_NO_GPL") && !(win_legacy && !getenv("SAVAGEWIND_VK_GPL")) && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+    // (Mesa Turnip, Adreno: off unless SAVAGEWIND_VK_GPL=1. Linked pipelines drew the 3D scene and the title picture
+    // wrong - white or black - in Turnip 27.0 on an Adreno 740; whole pipelines draw it right.)
+    bool turnip_gpl = drv.driverID == VK_DRIVER_ID_MESA_TURNIP && !getenv("SAVAGEWIND_VK_GPL");
+    bool gpl = !getenv("SAVAGEWIND_VK_NO_GPL") && !turnip_gpl && !(win_legacy && !getenv("SAVAGEWIND_VK_GPL")) && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
                has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
     // when each frame reached the display (SAVAGEWIND_LOG_PRESENT, tests: "present timing" below)
     bool pwait = getenv("SAVAGEWIND_LOG_PRESENT") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
@@ -319,6 +335,9 @@ static void create_device(void) {
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .pNext = &f13};
+#ifdef __ANDROID__
+    f12.bufferDeviceAddress = VK_TRUE;  // (global memory through the heap pieces' addresses: maxwell/shader.h GMEM_BDA)
+#endif
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
@@ -413,6 +432,7 @@ static void create_device(void) {
         SW_HAVE(f12, h12, timelineSemaphore) SW_HAVE(f12, h12, shaderInt8) SW_HAVE(f12, h12, samplerMirrorClampToEdge)
         SW_HAVE(f12, h12, uniformAndStorageBuffer8BitAccess) SW_HAVE(f12, h12, storageBuffer8BitAccess)
         SW_HAVE(f12, h12, scalarBlockLayout)
+        SW_HAVE(f12, h12, bufferDeviceAddress)
         SW_HAVE(f13, h13, dynamicRendering) SW_HAVE(f13, h13, synchronization2)
         SW_HAVE(f13, h13, shaderDemoteToHelperInvocation) SW_HAVE(f13, h13, shaderTerminateInvocation)
         SW_HAVE(f13, h13, maintenance4) SW_HAVE(f13, h13, pipelineCreationCacheControl)
@@ -433,6 +453,7 @@ static void create_device(void) {
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
+    g_vk.bda = f12.bufferDeviceAddress;
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     g_vk.present_queue = g_vk.queue;
     if (qi.queueCount == 2) vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 1, &g_vk.present_queue);
@@ -986,12 +1007,26 @@ static void pt_retire(void) {
 // the home screen): no frame is drawn while in the background, and on return the VkSurface and the
 // swapchain are made anew (the old surface is lost: presenting to it, the driver crashed).
 static _Atomic int sw_background, sw_surface_lost;
+// The window's surface. (Not SDL_Vulkan_CreateSurface on Android: SDL loads the system libvulkan for that, and the
+// instance may be an installed driver's - android/vk_dispatch.c.)
+static bool create_surface(void) {
+    SDL_PropertiesID props = SDL_GetWindowProperties(window);
+    void *nw = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    if (!nw) return SDL_SetError("no ANativeWindow yet");
+    VkAndroidSurfaceCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = nw};
+    VkResult r = vkCreateAndroidSurfaceKHR(g_vk.inst, &ci, NULL, &g_vk.surface);
+    return r == VK_SUCCESS ? true : SDL_SetError("vkCreateAndroidSurfaceKHR: %d", r);
+}
 static bool sw_app_events(void *ud, SDL_Event *e) {
     (void)ud;
     switch (e->type) {
     case SDL_EVENT_WILL_ENTER_BACKGROUND:
-    case SDL_EVENT_DID_ENTER_BACKGROUND: atomic_store(&sw_background, 1); break;
+    case SDL_EVENT_DID_ENTER_BACKGROUND:
+        atomic_store(&sw_background, 1);
+        vk_gpu_turbo(false);  // (the clock is the whole GPU's: not held for other apps)
+        break;
     case SDL_EVENT_DID_ENTER_FOREGROUND:
+        vk_gpu_turbo(g_settings.gpu_turbo);
         atomic_store(&sw_surface_lost, 1);
         atomic_store(&sw_background, 0);
         break;
@@ -1142,7 +1177,7 @@ bool vk_frame_begin(const float clear[4]) {
         g_vk.swapchain = VK_NULL_HANDLE;
         vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
         g_vk.surface = VK_NULL_HANDLE;
-        if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) {
+        if (!create_surface()) {
             LOG("[vk] surface again: %s (next frame)\n", SDL_GetError());
             atomic_store(&sw_surface_lost, 1);
             return false;
@@ -1595,12 +1630,17 @@ void ui_window_init(void) {
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     winsize_apply(window);
     create_instance();
-    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
 #ifdef __ANDROID__
+    if (!create_surface()) FATAL("surface: %s\n", SDL_GetError());
     SDL_AddEventWatch(sw_app_events, NULL);
+#else
+    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
 #endif
     pick_device();
     create_device();
+#ifdef __ANDROID__
+    vk_gpu_turbo(g_settings.gpu_turbo);
+#endif
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();

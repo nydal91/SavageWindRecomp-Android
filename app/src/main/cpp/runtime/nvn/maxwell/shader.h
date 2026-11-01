@@ -77,6 +77,15 @@ typedef struct {
 
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
+// Android (Adreno): binding 17 is a table - the heap's 256 MB pieces' buffer device addresses and the words mapped - and
+// global memory is read through those addresses (no host-pointer import, 128 MB storage buffer ranges there; Qualcomm's
+// gralloc aborts on hardware buffers of 512 MB or more)
+#ifdef __ANDROID__
+#define GMEM_BDA 1
+#define GMEM_PIECE_SHIFT 28  // bytes in a piece: 256 MB
+#define GMEM_PIECES 16       // (4 GB)
+#define GMEM_TABLE_SIZE (GMEM_PIECES * 8 + 16)  // { uint64_t ch[GMEM_PIECES]; uint lim; }
+#endif
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).

@@ -9,9 +9,16 @@ enum { UPSCALE_OFF = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* AMD
 #ifdef __APPLE__
 #define UPSCALE_SPATIAL UPSCALE_METALFX  // each OS's spatial upscaler
 #define UPSCALE_DEFAULT UPSCALE_METALFX  // (Metal has no internal resolution yet: MetalFX scales the image to the window)
+#elif defined(__ANDROID__)
+#define UPSCALE_SPATIAL UPSCALE_FSR1
+#define UPSCALE_DEFAULT UPSCALE_FSR1     // (a phone's screen at full height, widened, is ~4400x1116 for the 3D image:
+#define UPQ_DEFAULT 3                    // 3.4x the Switch's pixels - an Adreno 740 ran 7 fps; FSR 1 Performance)
 #else
 #define UPSCALE_SPATIAL UPSCALE_FSR1
 #define UPSCALE_DEFAULT UPSCALE_OFF      // the 3D image at the window's resolution
+#endif
+#ifndef UPQ_DEFAULT
+#define UPQ_DEFAULT 1  // UPQ_QUALITY
 #endif
 // quality modes, AMD's scale factors (per axis): Ultra Quality 1.3, Quality 1.5, Balanced 1.7, Performance 2.0
 enum { UPQ_ULTRA = 0, UPQ_QUALITY = 1, UPQ_BALANCED = 2, UPQ_PERFORMANCE = 3, UPQ_COUNT };
@@ -59,6 +66,8 @@ typedef struct {
     int fov;             // field of view in play, percent of the game's own (FOV_CHOICES)
     int text_language;   // index in g_text_languages (runtime/language.h), 0: the host's
     int voice_language;  // index in g_voice_languages, 0: the text language's voices
+    char gpu_driver[64]; // Android: Video > GPU driver, an installed driver's folder (android/vk_dispatch.c), "" = the phone's own
+    bool gpu_turbo;      // Android: Video > GPU max clocks, the GPU held at its top clock while the game is in front
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
 } Settings;
 
@@ -72,3 +81,4 @@ extern Settings g_settings;
 
 void settings_load(void);
 void settings_save(void);
+const char *settings_gpu_driver(void);  // (android/vk_dispatch.c: before the first Vulkan call)

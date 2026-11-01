@@ -5,6 +5,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.FileInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -111,6 +114,7 @@ public class MainActivity extends SDLActivity {
             bootLog("env: setup FAILED: " + e);
         }
 
+        installDrivers(root);
         copyAssets(root);
         bootLog("assets: copied");
         try {
@@ -165,6 +169,57 @@ public class MainActivity extends SDLActivity {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    // ------------------------------------------------------------------ GPU drivers
+    // Adreno drivers in the AdrenoTools format (Mesa Turnip...: a zip with meta.json and the driver's .so), put in
+    // <external files>/drivers, are unpacked into <files>/drivers/<zip name>/: native code can only load libraries
+    // from internal storage. android/vk_dispatch.c loads the one the GPU driver setting names.
+    private void installDrivers(File root) {
+        File in = new File(root, "drivers"), out = new File(getFilesDir(), "drivers");
+        in.mkdirs();
+        out.mkdirs();
+        try {
+            Os.setenv("SAVAGEWIND_DRIVERS_DIR", out.getAbsolutePath(), true);
+        } catch (Exception ignored) {
+        }
+        File[] zips = in.listFiles();
+        if (zips == null) return;
+        for (File z : zips) {
+            String n = z.getName();
+            if (!n.toLowerCase().endsWith(".zip")) continue;
+            File dir = new File(out, n.substring(0, n.length() - 4));
+            File stamp = new File(dir, ".from_zip");
+            if (stamp.isFile() && stamp.lastModified() >= z.lastModified()) continue;
+            deleteTree(dir);
+            dir.mkdirs();
+            boolean ok = false;
+            try (ZipInputStream zi = new ZipInputStream(new FileInputStream(z))) {
+                ZipEntry e;
+                byte[] buf = new byte[1 << 16];
+                while ((e = zi.getNextEntry()) != null) {
+                    if (e.isDirectory()) continue;
+                    String name = new File(e.getName()).getName();  // (flat: the driver and meta.json)
+                    if (name.isEmpty() || name.startsWith(".")) continue;
+                    try (OutputStream o = new FileOutputStream(new File(dir, name))) {
+                        int k;
+                        while ((k = zi.read(buf)) > 0) o.write(buf, 0, k);
+                    }
+                    ok |= name.equals("meta.json");
+                }
+                if (ok) new FileOutputStream(stamp).close();
+            } catch (IOException e) {
+                ok = false;
+            }
+            if (!ok) deleteTree(dir);
+            bootLog("drivers: " + n + (ok ? " installed" : " is not an AdrenoTools driver zip (no meta.json)"));
+        }
+    }
+
+    private static void deleteTree(File f) {
+        File[] sub = f.listFiles();
+        if (sub != null) for (File c : sub) deleteTree(c);
+        f.delete();
     }
 
     // ------------------------------------------------------------------ assets -> data root

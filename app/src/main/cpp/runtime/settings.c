@@ -23,8 +23,11 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .upscaler = UPSCALE_DEFAULT,  // (Off: the window's resolution; MetalFX on macOS)
-    .upscale_quality = UPQ_QUALITY,
+    .upscale_quality = UPQ_DEFAULT,
     .mouse_camera = true,
+#ifdef __ANDROID__
+    .gpu_turbo = true,
+#endif
     .mouse_sens = MOUSE_SENS_DEFAULT,
     .motion_sens = 1.0f,
     .stick_deadzone = {STICK_DEADZONE_DEFAULT, STICK_DEADZONE_DEFAULT},
@@ -133,6 +136,8 @@ void settings_load(void) {
             for (int i = 1; i < g_nvoice_languages; i++)
                 if (!strcmp(val, g_voice_languages[i].folder)) g_settings.voice_language = i;
         }
+        else if (!strcmp(key, "gpu_driver")) snprintf(g_settings.gpu_driver, sizeof g_settings.gpu_driver, "%s", strcmp(val, "system") ? val : "");
+        else if (!strcmp(key, "gpu_turbo")) g_settings.gpu_turbo = atoi(val) != 0;
         else if (!strcmp(key, "menu_tip_seen")) g_settings.menu_tip_seen = atoi(val) != 0, tip_key = true;
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
@@ -227,6 +232,12 @@ void settings_save(void) {
     fprintf(f, "text_language = %s\n", tl > 0 && tl < g_ntext_languages ? g_text_languages[tl].folder : "auto");
     fprintf(f, "voice_language = %s\n", vl > 0 && vl < g_nvoice_languages ? g_voice_languages[vl].folder : "text");
     fprintf(f, "menu_tip_seen = %d\n", g_settings.menu_tip_seen);
+#ifdef __ANDROID__
+    fprintf(f, "gpu_driver = %s\n", g_settings.gpu_driver[0] ? g_settings.gpu_driver : "system");
+    fprintf(f, "gpu_turbo = %d\n", g_settings.gpu_turbo);
+#endif
     bind_settings_save(f);
     fclose(f);
 }
+
+const char *settings_gpu_driver(void) { return g_settings.gpu_driver; }

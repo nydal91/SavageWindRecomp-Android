@@ -20,7 +20,11 @@
 static uint64_t stat_build_waits;  // draws that waited for their pipeline (draw_must_happen)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_gw_waits, stat_gw_holds;  // draws / dispatches that waited for a storing shader; lists held (gw_check)
-static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes;  // UpdateUniformBuffer; guest_copy cache
+static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_gcopy_bytes;
+static uint64_t stat_gcopy_piece[17];  // (bytes copied by 256 MB of the heap; [16]: elsewhere)
+#ifdef __ANDROID__
+static void hp_learn(uint32_t m);
+#endif  // UpdateUniformBuffer; guest_copy cache
 static uint64_t stat_feedback_live;  // depth attachments sampled as they are (read-only feedback, no copy)
 static uint64_t stat_feedback_loops, stat_feedback_barriers;  // draws sampling a target they write, in a feedback loop
 static bool pass_ds_written;         // a draw of the current pass wrote depth or stencil
@@ -96,8 +100,9 @@ void vk_collect_dead(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
-#define SUBS 32  // (several a frame: long command lists go to the GPU in pieces, see begin_pass)
+#define SUBS 12  // (several a frame: long command lists go to the GPU in pieces, see begin_pass)
 typedef struct {
+    VkCommandPool cpool;  // the slot's own: reset whole when the slot is reused (see begin_cb)
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
     uint64_t seq;
@@ -166,6 +171,7 @@ static Sub *sub(void) {
             s->ts = false;
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
+        if (s->cpool) vkResetCommandPool(g_vk.dev, s->cpool, 0);  // (keeps the command buffers' memory)
         s->cur_pool = 0;
         s->seq = submit_seq + 1;
         s->main_begun = s->upload_begun = false;
@@ -173,10 +179,18 @@ static Sub *sub(void) {
     return s;
 }
 
-static void begin_cb(VkCommandBuffer *cb, bool *begun) {
+// Command buffers come from their slot's pool, reset as a whole (vkResetCommandPool, resources kept) when the slot is
+// reused. (Begun from a RESET_COMMAND_BUFFER pool, each vkBeginCommandBuffer reset the buffer itself and Adreno's driver
+// freed and reallocated its GPU memory every time - kgsl ioctls, ~13% of the render thread.)
+static void begin_cb(Sub *s, VkCommandBuffer *cb, bool *begun) {
     if (*begun) return;
+    if (!s->cpool) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = 0,  // (not TRANSIENT: Adreno frees a transient pool's memory at each reset)
+                                      .queueFamilyIndex = g_vk.qfam};
+        VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &s->cpool));
+    }
     if (!*cb) {
-        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g_vk.pool,
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = s->cpool,
                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
         VK_CHECK(vkAllocateCommandBuffers(g_vk.dev, &ai, cb));
     }
@@ -189,7 +203,7 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
 VkCommandBuffer vk_cmd(void) {
     Sub *s = sub();
     if (!s->main_begun) {
-        begin_cb(&s->main, &s->main_begun);
+        begin_cb(s, &s->main, &s->main_begun);
         dyn_epoch++;
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
         if (prof && prof_qp) {
@@ -203,7 +217,7 @@ VkCommandBuffer vk_cmd(void) {
 
 VkCommandBuffer vk_upload_cmd(void) {
     Sub *s = sub();
-    begin_cb(&s->upload, &s->upload_begun);
+    begin_cb(s, &s->upload, &s->upload_begun);
     return s->upload;
 }
 
@@ -524,6 +538,10 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     }
     stat_gcopy_miss++;
     stat_gcopy_bytes += size;
+    {
+        uint64_t pc = addr >= HEAP_BASE ? (addr - HEAP_BASE) >> 28 : 16;
+        stat_gcopy_piece[pc < 16 ? pc : 16] += size;
+    }
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
     uint64_t mask = 0;
     for (int i = 0; i < nuub; i++)
@@ -718,6 +736,21 @@ const char *renderer_stats(void) {
                  (unsigned long long)stat_uub, (unsigned long long)stat_uub_same, (unsigned long long)stat_gcopy_hit,
                  (unsigned long long)stat_gcopy_miss, stat_gcopy_bytes / 1048576.0);
         n = strlen(stats_text);
+        if (getenv("SAVAGEWIND_VK_GCOPY_PIECES")) {  // the copies' MB by 256 MB of the heap
+            n += snprintf(stats_text + n, sizeof stats_text - n, ", gcopy by piece");
+            for (int i = 0; i < 17 && n < sizeof stats_text; i++)
+                if (stat_gcopy_piece[i] >> 20) n += snprintf(stats_text + n, sizeof stats_text - n, " %d:%llu", i, (unsigned long long)(stat_gcopy_piece[i] >> 20));
+            n = strlen(stats_text);
+        }
+#ifdef __ANDROID__
+        {  // pieces copied from by the MB (vertices, indices: not constants alone) belong in GPU memory
+            uint32_t m = 0;
+            for (int i = 0; i < 16; i++)
+                if (stat_gcopy_piece[i] >= (16u << 20)) m |= 1u << i;
+            if (m) hp_learn(m);
+        }
+#endif
+        memset(stat_gcopy_piece, 0, sizeof stat_gcopy_piece);
         if (stat_build_waits) snprintf(stats_text + n, sizeof stats_text - n, ", build waits %llu", (unsigned long long)stat_build_waits);
         stat_build_waits = 0;
         stat_uub = stat_uub_same = stat_gcopy_hit = stat_gcopy_miss = stat_gcopy_bytes = 0;
@@ -2679,9 +2712,23 @@ static bool depth_read_only(void) {
 
 static long logfb = -1, fbskip;  // (SAVAGEWIND_LOG_FEEDBACK)
 static unsigned fb_draws;
+// Without feedback loops (Adreno: no VK_EXT_attachment_feedback_loop_layout) a draw that samples the color target it
+// writes reads a snapshot. Taken before each such draw, it ended the pass every time: BOTW's terrain (fs
+// 50fc37edcd79cf02 and two more read G-buffer target 0 at their own pixel) made ~230 snapshots a frame in the Shrine of
+// Resurrection, each a store and reload of the pass's six 1240x558 targets on the tiler - 18.8 ms of copies and more in
+// the passes, of a 56 ms GPU frame. Instead a snapshot lasts through those draws (they don't invalidate it, other
+// writes to the target still do): a run of terrain patches reads the target as it was before the run. Where patches
+// overlap, the later one misses the bits the earlier one ORed in. SAVAGEWIND_VK_FEEDBACK_EXACT=1: a snapshot each draw.
+static uint32_t fb_self_mask;  // color targets this draw samples from a snapshot (no invalidation by its own write)
+static bool feedback_approx(void) {
+    static int on = -1;
+    if (on < 0) on = !g_vk.feedback_loop && !getenv("SAVAGEWIND_VK_FEEDBACK_EXACT");
+    return on;
+}
 static void resolve_feedback(Prog *pr) {
     nfeedback = 0;
     draw_feedback = false;
+    fb_self_mask = 0;
     static int off = -1;
     if (off < 0) off = getenv("SAVAGEWIND_NO_FEEDBACK") != NULL;
     if (off) return;
@@ -2832,6 +2879,10 @@ static void resolve_feedback(Prog *pr) {
                     continue;
                 }
             }
+            int self_ci = -1;  // (a color target this draw writes)
+            if (t != st.rt.depth)
+                for (int k = 0; k < st.rt.ncolor; k++) if (st.rt.color[k] == t && draw_writes_color(pr, k)) self_ci = k;
+            if (self_ci >= 0 && feedback_approx()) fb_self_mask |= 1u << self_ci;
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
                 feedback_tex[nfeedback] = t;
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
@@ -3088,6 +3139,212 @@ static bool gmem_mapped;     // the heap is GPU memory mapped at its addresses (
 
 #ifdef __linux__
 #include <sys/mman.h>
+#ifdef __ANDROID__
+// Android (Adreno 740: no host-pointer import, gralloc aborts on hardware buffers of 512 MB+, 128 MB storage buffer
+// ranges): the heap is GPU memory from the first SetHeapSize, as on RADV below, in pieces of 256 MB - each exported as a dma-buf, mapped at its
+// place in the heap, a buffer with a device address. Shaders read global memory through a table of those addresses
+// (binding 17: maxwell/shader.h GMEM_BDA); vertices and indices inside one piece are read in place (guest_direct).
+// Without it the shaders' global memory read zeros (BOTW's text didn't draw) and every vertex buffer was copied.
+#define HP_PIECE (1ull << GMEM_PIECE_SHIFT)
+static VkBuffer hp_buf[GMEM_PIECES];
+static VkDeviceMemory hp_mem[GMEM_PIECES];
+static int nhp;           // pieces in GPU memory
+static uint64_t hp_size;  // bytes of the heap (from HEAP_BASE) the pieces' table covers (0: no pieces)
+static uint64_t hp_len[GMEM_PIECES];  // each piece's bytes (0: ordinary memory, not on the GPU)
+static uint32_t hp_saved; // ... as in cache/vk_heap_pieces.txt
+static VkBuffer hp_tab;   // { uint64_t ch[GMEM_PIECES]; uint lim; }
+static VkDeviceMemory hp_tab_mem;
+
+#include <android/hardware_buffer.h>
+#include <sys/socket.h>
+// The dma-buf of a hardware buffer: its native handle's first fd, through the NDK's own way to pass it on
+static int ahb_dmabuf_fd(AHardwareBuffer *hb) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv)) return -1;
+    int fd = -1;
+    if (AHardwareBuffer_sendHandleToUnixSocket(hb, sv[0]) == 0) {
+        char data[4096];
+        char cbuf[CMSG_SPACE(sizeof(int) * 16)];
+        struct iovec iov = {data, sizeof data};
+        struct msghdr m = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf, .msg_controllen = sizeof cbuf};
+        if (recvmsg(sv[1], &m, MSG_CMSG_CLOEXEC) >= 0)
+            for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c))
+                if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+                    int nfd = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+                    int *fds = (int *)CMSG_DATA(c);
+                    for (int i = 0; i < nfd; i++) {
+                        if (fd < 0) fd = fds[i];
+                        else close(fds[i]);
+                    }
+                }
+    }
+    close(sv[0]);
+    close(sv[1]);
+    return fd;
+}
+
+static VkResult ahb_props(VkDevice d, AHardwareBuffer *hb, VkAndroidHardwareBufferPropertiesANDROID *p) {
+    PFN_vkGetAndroidHardwareBufferPropertiesANDROID f =
+        (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vkGetDeviceProcAddr(d, "vkGetAndroidHardwareBufferPropertiesANDROID");
+    return f ? f(d, hb, p) : VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+static void heap_pieces(uint64_t size) {
+    PFN_vkGetBufferDeviceAddress gba = (PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(g_vk.dev, "vkGetBufferDeviceAddress");
+    if (!gba) return;
+    size = (size + 0x1FFFFF) & ~0x1FFFFFull;
+    uint64_t addr[GMEM_PIECES] = {0};
+    double t0 = SDL_GetTicksNS() / 1e9;
+    // Only the pieces the GPU read from last time (cache/vk_heap_pieces.txt, learned while playing: hp_learn - the
+    // vertices, indices and constants copied from each, the global memory shaders read). (Not those of every memory
+    // pool: pools are all over the heap, textures too, and textures are uploaded to images anyway.) The whole heap in hardware buffers was 3.1 GB of
+    // memory the kernel can't move or reclaim, allocated at once although the game touches ~1.6 GB of it: the
+    // phone's Normal zone ran out, the kernel scanned for pages without end and evicted the game's own code (multi-
+    // second stalls, 1-10 fps). The rest stays ordinary memory, its vertices / uniforms copied as without pieces.
+    // SAVAGEWIND_VK_HEAP_PIECES=<hex mask> overrides (0: none, ffff: all).
+    uint32_t mask = 0;
+    {
+        char path[512];
+        vk_cache_path(path, sizeof path, "vk_heap_pieces.txt");
+        FILE *fp = fopen(path, "r");
+        if (fp) {
+            unsigned v = 0;
+            if (fscanf(fp, "%x", &v) == 1) mask = v;
+            fclose(fp);
+        }
+        hp_saved = mask;
+        if (getenv("SAVAGEWIND_VK_HEAP_PIECES")) mask = (uint32_t)strtoul(getenv("SAVAGEWIND_VK_HEAP_PIECES"), NULL, 16);
+        LOG("[vk] heap pieces for the GPU: mask %x (%s)\n", mask, getenv("SAVAGEWIND_VK_HEAP_PIECES") ? "SAVAGEWIND_VK_HEAP_PIECES" : fp ? path : "none learned yet");
+    }
+    uint64_t covered = 0, in_gpu = 0;
+    for (int pi = 0; pi < GMEM_PIECES && (uint64_t)pi * HP_PIECE < size; pi++) {
+        uint64_t off = (uint64_t)pi * HP_PIECE;
+        uint64_t n = size - off < HP_PIECE ? size - off : HP_PIECE;
+        covered = off + n;
+        if (!(mask & (1u << pi))) continue;
+        // an AHardwareBuffer (gralloc: CPU-cached pages, allocated at once), its dma-buf mapped at the piece's place
+        // and the buffer imported. (The driver's own exportable memory is uncached only: the game's whole heap in
+        // uncached memory stalled the phone.)
+        AHardwareBuffer_Desc hd = {.width = (uint32_t)n, .height = 1, .layers = 1, .format = AHARDWAREBUFFER_FORMAT_BLOB,
+                                   .usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN |
+                                            AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER};
+        AHardwareBuffer *hb = NULL;
+        int ar = AHardwareBuffer_allocate(&hd, &hb);
+        if (ar || !hb) { LOG("[vk] heap piece %d (%llu MB): no hardware buffer (%d)\n", pi, (unsigned long long)(n >> 20), ar); continue; }
+        int fd = ahb_dmabuf_fd(hb);
+        void *p = fd < 0 ? MAP_FAILED : mmap((void *)(uintptr_t)(HEAP_BASE + off), n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+        if (fd >= 0) close(fd);  // (the mapping keeps the dma-buf)
+        if (p != (void *)(uintptr_t)(HEAP_BASE + off)) {
+            LOG("[vk] heap piece %d: %s\n", pi, fd < 0 ? "no dma-buf from the hardware buffer" : "mapping failed");
+            if (p != MAP_FAILED)
+                mmap((void *)(uintptr_t)(HEAP_BASE + off), n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+            AHardwareBuffer_release(hb);
+            continue;
+        }
+        VkAndroidHardwareBufferPropertiesANDROID hp = {.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
+        VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                               .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID};
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = n,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+        VkBuffer buf = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        VkMemoryRequirements req = {0};
+        VkResult r = ahb_props(g_vk.dev, hb, &hp);
+        if (r == VK_SUCCESS) r = vkCreateBuffer(g_vk.dev, &bi, NULL, &buf);
+        if (r == VK_SUCCESS) {
+            vkGetBufferMemoryRequirements(g_vk.dev, buf, &req);
+            uint32_t bits = hp.memoryTypeBits & req.memoryTypeBits;
+            VkImportAndroidHardwareBufferInfoANDROID im = {.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID, .buffer = hb};
+            VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &im, .buffer = buf};
+            VkMemoryAllocateFlagsInfo fl = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &ded,
+                                            .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+            VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &fl,
+                                       .allocationSize = hp.allocationSize, .memoryTypeIndex = bits ? (uint32_t)__builtin_ctz(bits) : 0};
+            r = bits ? vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) : VK_ERROR_FORMAT_NOT_SUPPORTED;
+            if (r == VK_SUCCESS && !nhp) {
+                VkPhysicalDeviceMemoryProperties mpp;
+                vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mpp);
+                LOG("[vk] heap pieces: hardware buffers imported as memory type %u (flags %x; types %x / %x)\n", ai.memoryTypeIndex,
+                    mpp.memoryTypes[ai.memoryTypeIndex].propertyFlags, hp.memoryTypeBits, req.memoryTypeBits);
+            }
+        }
+        AHardwareBuffer_release(hb);  // (the import and the mapping hold it)
+        if (r != VK_SUCCESS) {
+            LOG("[vk] heap piece %d: import failed (%d)\n", pi, r);
+            if (buf) vkDestroyBuffer(g_vk.dev, buf, NULL);
+            mmap((void *)(uintptr_t)(HEAP_BASE + off), n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+            continue;
+        }
+        VK_CHECK(vkBindBufferMemory(g_vk.dev, buf, mem, 0));
+        VkBufferDeviceAddressInfo dai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
+        addr[pi] = gba(g_vk.dev, &dai);
+        hp_buf[pi] = buf;
+        hp_mem[pi] = mem;
+        hp_len[pi] = n;
+        nhp++;
+        in_gpu += n;
+    }
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    if (!nhp) return;
+    hp_size = covered;
+    gmem_size = covered;
+    gmem_mapped = true;  // (no host-pointer import attempts)
+    // the table, host-visible
+    VkBufferCreateInfo tb = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GMEM_TABLE_SIZE, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VK_CHECK(vkCreateBuffer(g_vk.dev, &tb, NULL, &hp_tab));
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(g_vk.dev, hp_tab, &req);
+    uint32_t type = 0;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+        if ((req.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                                                    (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { type = i; break; }
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
+    VK_CHECK(vkAllocateMemory(g_vk.dev, &ai, NULL, &hp_tab_mem));
+    VK_CHECK(vkBindBufferMemory(g_vk.dev, hp_tab, hp_tab_mem, 0));
+    void *m;
+    VK_CHECK(vkMapMemory(g_vk.dev, hp_tab_mem, 0, GMEM_TABLE_SIZE, 0, &m));
+    memset(m, 0, GMEM_TABLE_SIZE);
+    memcpy(m, addr, sizeof addr);
+    *(uint32_t *)((char *)m + GMEM_PIECES * 8) = (uint32_t)(hp_size >> 2);
+    vkUnmapMemory(g_vk.dev, hp_tab_mem);
+    LOG("[vk] guest heap in GPU memory: %d pieces, %llu of %llu MB (hardware buffers mapped at the heap, device addresses), %.2f s\n",
+        nhp, (unsigned long long)(in_gpu >> 20), (unsigned long long)(size >> 20), SDL_GetTicksNS() / 1e9 - t0);
+}
+
+// Pieces the GPU reads from (hp_learn_copies, hp_learn_range): added to cache/vk_heap_pieces.txt, for the next start
+static void hp_learn(uint32_t m) {
+    if ((hp_saved | m) == hp_saved) return;
+    hp_saved |= m;
+    char path[512];
+    vk_cache_path(path, sizeof path, "vk_heap_pieces.txt");
+    FILE *fp = fopen(path, "w");
+    if (fp) {
+        fprintf(fp, "%x\n", hp_saved);
+        fclose(fp);
+    }
+    LOG("[vk] the GPU reads heap pieces %x: saved for the next start (%s)\n", hp_saved, path);
+}
+static void heap_pieces_reset(void) {  // (GPU idle; the mappings stay until guest memory is reset)
+    for (int i = 0; i < GMEM_PIECES; i++) {
+        if (hp_buf[i]) vkDestroyBuffer(g_vk.dev, hp_buf[i], NULL);
+        if (hp_mem[i]) vkFreeMemory(g_vk.dev, hp_mem[i], NULL);
+        hp_buf[i] = VK_NULL_HANDLE;
+        hp_mem[i] = VK_NULL_HANDLE;
+        hp_len[i] = 0;
+    }
+    if (hp_tab) {
+        vkDestroyBuffer(g_vk.dev, hp_tab, NULL);
+        vkFreeMemory(g_vk.dev, hp_tab_mem, NULL);
+    }
+    hp_tab = VK_NULL_HANDLE;
+    nhp = 0;
+    hp_size = 0;
+}
+#endif
 // On amdgpu the import is a userptr buffer, and the kernel gets every page of every userptr buffer again at each
 // submission: on the Steam Deck ~4 ms a submit for the 3 GB heap (0.03 ms without it), half of a 40 ms frame. So
 // there the heap is GPU memory from the start: the first SetHeapSize (kernel.c), before the game has touched the
@@ -3102,6 +3359,14 @@ void backend_heap_set(uint64_t size) {
             (unsigned long long)(size >> 20), (unsigned long long)(gmem_size >> 20));
     if (off || gmem_mapped || gmem_buf || !size) return;
     vk_wait_ready();
+#ifdef __ANDROID__
+    static bool tried;
+    if (g_vk.ahb && g_vk.bda && !hp_size && !tried) { tried = true; heap_pieces(size); }
+    else if (hp_size && size > hp_size)
+        LOG("[vk] guest heap grew to %llu MB past the %llu MB in pieces: the rest is copied\n",
+            (unsigned long long)(size >> 20), (unsigned long long)(hp_size >> 20));
+    return;
+#endif
     if (!g_vk.dmabuf || !g_vk.radv) return;
     size = (size + 0x1FFFFF) & ~0x1FFFFFull;  // (2 MB pages)
     uint32_t type = UINT32_MAX;
@@ -3160,6 +3425,14 @@ void backend_heap_set(uint64_t size) { (void)size; }
 #endif
 
 static VkDescriptorBufferInfo gmem_info(void) {
+#ifdef __ANDROID__
+    if (hp_tab) return (VkDescriptorBufferInfo){hp_tab, 0, GMEM_TABLE_SIZE};
+    {  // (no pieces: lim 0, every access out of range - zeros)
+        static uint32_t zero[GMEM_TABLE_SIZE / 4];
+        VkSpan z = vk_transient_copy(zero, sizeof zero, 256);
+        return (VkDescriptorBufferInfo){z.buf, z.off, sizeof zero};
+    }
+#endif
     static int off = -1;
     if (off < 0) off = getenv("SAVAGEWIND_VK_NO_GMEM") != NULL || !g_vk.host_import;
     uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
@@ -3181,6 +3454,16 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = getenv("SAVAGEWIND_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
+#ifdef __ANDROID__
+    {  // (within one piece)
+        uint64_t o = addr - HEAP_BASE;
+        if (!size || o + size > hp_size || (o >> GMEM_PIECE_SHIFT) != ((o + size - 1) >> GMEM_PIECE_SHIFT)) return false;
+        if ((o & (HP_PIECE - 1)) + size > hp_len[o >> GMEM_PIECE_SHIFT]) return false;  // (ordinary memory, or past the piece)
+        *buf = hp_buf[o >> GMEM_PIECE_SHIFT];
+        *off = o & (HP_PIECE - 1);
+        return true;
+    }
+#endif
     if (!gmem_mapped && addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     *buf = gmem_buf;
@@ -3253,12 +3536,27 @@ static void gw_note(int stage) {  // a shader of this stage that stores to globa
     // No heap buffer (no host import, no mapped heap: Adreno has neither, and a 128 MB storage buffer range): the
     // shader's stores go to a scratch buffer, never to guest memory, so there is nothing for copies to wait for.
     // (Waiting anyway made the GPU idle before every draw: ~0.5 fps in BotW's world on an Adreno 740.)
+#ifdef __ANDROID__
+    if (!nhp) return;
+#else
     if (!gmem_buf) return;
+#endif
     bool ok = !hold;
     int n = 0;
     for (int i = 0; i < 16 && ok; i++) {
         Range r = st.sbuf[stage][i];
         if (!r.addr || !r.size) continue;
+#ifdef __ANDROID__
+        {  // (only the pieces: stores past them are dropped, nothing there for copies to wait for)
+            uint64_t lo = r.addr < HEAP_BASE ? HEAP_BASE : r.addr, hi = r.addr + r.size, end = HEAP_BASE + hp_size;
+            if (hi > end) hi = end;
+            bool any = false;  // (a piece in GPU memory under it)
+            for (uint64_t a = lo; a < hi && !any; a = ((a - HEAP_BASE) | (HP_PIECE - 1)) + 1 + HEAP_BASE) any = hp_len[(a - HEAP_BASE) >> GMEM_PIECE_SHIFT] != 0;
+            if (!any) { n++; continue; }  // (counted: no hold for it)
+            r.addr = lo;
+            r.size = hi - lo;
+        }
+#endif
         ok = gw_add(r.addr, r.addr + r.size);
         n++;
     }
@@ -3334,6 +3632,9 @@ void vk_exec_reset(void) {
         gmem_buf = VK_NULL_HANDLE;
         gmem_mem = VK_NULL_HANDLE;
     }
+#ifdef __ANDROID__
+    heap_pieces_reset();
+#endif
     gmem_size = gmem_tried = 0;
     gmem_mapped = false;  // (still mapped until main.c resets guest memory: the dma-buf lives on until then)
     st_defaults();
@@ -3498,6 +3799,30 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             bi[n] = gmem_info();
+#ifdef __ANDROID__
+            {  // the global memory the stage's shader reads (its storage buffers): those pieces belong in GPU memory
+                uint32_t m = 0;
+                for (int i = 0; i < 16; i++) {
+                    Range r = st.sbuf[stage][i];
+                    if (!r.addr || !r.size || r.addr < HEAP_BASE) continue;
+                    for (uint64_t pc = (r.addr - HEAP_BASE) >> GMEM_PIECE_SHIFT; pc <= (r.addr + r.size - 1 - HEAP_BASE) >> GMEM_PIECE_SHIFT && pc < 16; pc++)
+                        m |= 1u << pc;
+                }
+                if (m & ~hp_saved) hp_learn(m);
+            }
+            if (!nhp) {  // (diagnostic: shaders that read global memory get zeros without a heap buffer)
+                static uint64_t seen[256];
+                static int nseen;
+                uint64_t code = st.program ? st.program->stages[stage].code_addr : 0;
+                bool found = false;
+                for (int k = 0; k < nseen; k++) found |= seen[k] == (code ^ (uint64_t)stage << 60);
+                if (!found && nseen < 256) {
+                    seen[nseen++] = code ^ (uint64_t)stage << 60;
+                    LOG("[vk] no heap buffer: stage %d shader %llx reads global memory (zeros) at frame %llu\n", stage,
+                        (unsigned long long)code, (unsigned long long)vk_frame_counter());
+                }
+            }
+#endif
             w[n].pBufferInfo = &bi[n];
         } else {
             continue;  // rscale / tint: written below, once the textures (and their scales) are known
@@ -4396,7 +4721,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
-        if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
+        if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF) && !(fb_self_mask & (1u << i))) snapshots_invalidate(st.rt.color[i]);
     {
         uint32_t sm = st.program->stage_mask, all = ~0u;  // (geometry and tessellation stages: every bound buffer)
         uint32_t cbufs[6] = {pr->vi->cbuf_mask, pr->fi->cbuf_mask, sm & 4 ? all : 0, sm & 8 ? all : 0, sm & 16 ? all : 0, 0};

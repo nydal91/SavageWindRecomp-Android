@@ -27,6 +27,10 @@ extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.c
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+#ifdef __ANDROID__
+#include <dirent.h>
+#include "../../android/vk_dispatch.h"
+#endif
 #include "../window_size.h"
 extern "C" {
 #include "../language.h"
@@ -597,6 +601,44 @@ static void tab_display(void) {
                "frame time graph. F10 switches between them while you play.");
 
     opt_section("Rendering");
+#ifdef __ANDROID__
+    {   // GPU driver (android/vk_dispatch.c): the phone's own or one installed into <files>/drivers (MainActivity)
+        static std::vector<std::string> dirs;
+        static bool scanned;
+        if (!scanned) {
+            scanned = true;
+            dirs.push_back("");
+            const char *root = getenv("SAVAGEWIND_DRIVERS_DIR");
+            if (DIR *d = root ? opendir(root) : NULL) {
+                while (struct dirent *e = readdir(d))
+                    if (e->d_name[0] != '.' && e->d_type == DT_DIR) dirs.push_back(e->d_name);
+                closedir(d);
+            }
+        }
+        std::vector<const char *> names;
+        int cur = 0;
+        for (size_t i = 0; i < dirs.size(); i++) {
+            names.push_back(i ? dirs[i].c_str() : "System");
+            if (dirs[i] == g_settings.gpu_driver) cur = (int)i;
+        }
+        static std::string desc;
+        desc = std::string("The Vulkan driver the game draws with: System is the phone's own. Others (Mesa Turnip, "
+                           "other Adreno drivers) are installed by putting their .zip in Android/data/"
+                           "com.deivid22srk.savagewind/files/drivers and starting the app again. Takes effect at the "
+                           "next start. In use now: ") + vk_driver_name() + ".";
+        if (opt_choice("GPU driver", &cur, names.data(), (int)names.size(), 0, desc.c_str(), false)) {
+            snprintf(g_settings.gpu_driver, sizeof g_settings.gpu_driver, "%s", dirs[cur].c_str());
+            settings_save();
+        }
+    }
+    if (opt_toggle("GPU max clocks", &g_settings.gpu_turbo, true,
+                   "Holds the GPU at its highest clock while the game is in front (the phone still slows it when it "
+                   "gets hot). The phone's own clocking keeps the GPU slow for this game: about 30% more FPS, for more "
+                   "battery use and heat.")) {
+        vk_gpu_turbo(g_settings.gpu_turbo);
+        settings_save();
+    }
+#endif
     {   // Upscaler: Off, this OS's spatial upscaler (its modes on the row below), and the temporal ones still to come.
         // Values that can't be picked yet are shown greyed ("coming soon"); stepping onto them keeps the one in use.
         // The modes wait for render-target scaling (upscale_modes_available): until then the upscaler brings the

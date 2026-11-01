@@ -57,7 +57,7 @@ add_library(main SHARED
     ${RUNTIME}/nvn/vulkan/vma.cpp
     ${IMGUI_CORE} ${IMGUI_BACKENDS}
     ${ANDROID_DIR}/android_main.c ${ANDROID_DIR}/android_bridge.c
-    ${ANDROID_DIR}/vulkan_shims.c)
+    ${ANDROID_DIR}/vk_dispatch.c)
 # NOTE: tools/gamelib_entry.c is NOT part of libmain.so - it is the game code library's entry
 # (compiled on the player's device into swgame.so, like the desktop Makefile's GEN_OBJ).
 
@@ -69,7 +69,8 @@ set_target_properties(main PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 
 target_compile_definitions(main PRIVATE
-    GAMELIB_ID="${GAMELIB_ID}")
+    GAMELIB_ID="${GAMELIB_ID}"
+    VK_USE_PLATFORM_ANDROID_KHR)  # (AHardwareBuffer import: the guest heap, exec.c heap_pieces)
 # gamebuild.c / gamelib.c carry the game-code build's flags (as the Makefile's -D does)
 set_source_files_properties(${RUNTIME}/gamebuild.c ${RUNTIME}/gamelib.c PROPERTIES
     COMPILE_DEFINITIONS "GAMELIB_CFLAGS=\"-O1 -fno-strict-aliasing\";GAMELIB_SHARED=\"-shared\"")
@@ -99,8 +100,13 @@ target_link_libraries(main PRIVATE
     ${DEPS}/lib/libswscale.a
     -Wl,--end-group
     ${SHADERC_ARCHIVES}
-    vulkan
+    adrenotools
     ${android-lib} ${log-lib} ${z-lib})
+
+# Installed GPU drivers (Mesa Turnip...): libadrenotools loads them, android/vk_dispatch.c. Its hook libraries
+# (libmain_hook.so...) are packaged too: adrenotools loads them from nativeLibraryDir.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/libadrenotools)
+add_dependencies(main main_hook file_redirect_hook gsl_alloc_hook)
 
 # The Android link runs with --no-undefined, which skips lld's __start_/__stop_ synthesis for the
 # runtime's HLE / reset sections: hle.ld defines them (see the file).

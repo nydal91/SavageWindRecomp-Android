@@ -44,6 +44,8 @@ typedef struct {
     bool feedback_loop;        // attachment feedback loops + barriers inside dynamic rendering (exec.c)
     bool feedback_layout;      // ... in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL layout (no VK_KHR_unified_image_layouts: GENERAL otherwise)
     bool gpl;                  // graphics pipeline libraries with fast linking (exec.c)
+    bool ahb;                  // VK_ANDROID_external_memory_android_hardware_buffer on
+    bool bda;                  // bufferDeviceAddress on (Android: global memory, exec.c)
     bool dmabuf;               // memory exported as dma-bufs (Linux: the guest heap, exec.c backend_heap_set)
     bool radv;                 // the driver is Mesa's RADV
     bool present_wait;         // VK_KHR_present_id + present_wait on (SAVAGEWIND_LOG_PRESENT: when frames are shown)
