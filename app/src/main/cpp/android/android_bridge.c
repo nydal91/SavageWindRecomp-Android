@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <stdio.h>
 
 #include <SDL3/SDL.h>  // SDL_DialogFileCallback
 
@@ -17,7 +19,7 @@ static JavaVM *g_vm;
 static jobject g_activity;      // global ref (MainActivity)
 static jclass g_clsMain;        // MainActivity
 static jclass g_clsSwgen;       // Swgen
-static jmethodID g_mPickFolder, g_mPickFile;
+static jmethodID g_mPickFolder, g_mPickFile, g_mPickDriver;
 static jmethodID g_mSwgenRun;
 
 // Pending dialog callbacks from runtime/ui/launcher.mm (SDL's dialog API is async).
@@ -63,7 +65,27 @@ static void jni_swgen_done(JNIEnv *env, jclass cls, jint slot, jint exit_code) {
     android_job_mark_done(slot, exit_code);
 }
 
+// Video > GPU driver > Install driver from .zip (MainActivity.pickDriverZip): the result, from Java's thread, for
+// the menu (SDL thread) to take with android_driver_install_poll.
+static pthread_mutex_t g_drv_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool g_drv_ready;
+static char g_drv_name[64], g_drv_error[256];
+
+static void jni_on_driver_installed(JNIEnv *env, jclass cls, jstring name, jstring error) {
+    (void)cls;
+    const char *n = name ? (*env)->GetStringUTFChars(env, name, NULL) : NULL;
+    const char *e = error ? (*env)->GetStringUTFChars(env, error, NULL) : NULL;
+    pthread_mutex_lock(&g_drv_mu);
+    snprintf(g_drv_name, sizeof g_drv_name, "%s", n ? n : "");
+    snprintf(g_drv_error, sizeof g_drv_error, "%s", e ? e : "");
+    g_drv_ready = true;
+    pthread_mutex_unlock(&g_drv_mu);
+    if (n) (*env)->ReleaseStringUTFChars(env, name, n);
+    if (e) (*env)->ReleaseStringUTFChars(env, error, e);
+}
+
 static const JNINativeMethod kMainMethods[] = {
+    {"nativeOnDriverInstalled", "(Ljava/lang/String;Ljava/lang/String;)V", (void *)jni_on_driver_installed},
     {"nativeSetContext", "(Landroid/content/Context;)V", (void *)jni_set_context},
     {"nativeOnPicked", "(ILjava/lang/String;)V", (void *)jni_on_picked},
     {"nativeSwgenDone", "(II)V", (void *)jni_swgen_done},
@@ -82,6 +104,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     g_clsMain = (jclass)(*env)->NewGlobalRef(env, main);
     g_mPickFolder = (*env)->GetStaticMethodID(env, main, "pickFolder", "()V");
     g_mPickFile = (*env)->GetStaticMethodID(env, main, "pickFile", "()V");
+    g_mPickDriver = (*env)->GetStaticMethodID(env, main, "pickDriverZip", "()V");
 
     jclass swgen = (*env)->FindClass(env, "com/deivid22srk/savagewind/Swgen");
     if (swgen) {
@@ -103,6 +126,30 @@ void plat_pick_file(void) {
     JNIEnv *env = thread_env();
     if (!env || !g_mPickFile) return;
     (*env)->CallStaticVoidMethod(env, g_clsMain, g_mPickFile);
+}
+
+bool android_pick_driver_zip(void) {
+    JNIEnv *env = thread_env();
+    if (!env || !g_mPickDriver) return false;
+    pthread_mutex_lock(&g_drv_mu);
+    g_drv_ready = false;
+    pthread_mutex_unlock(&g_drv_mu);
+    (*env)->CallStaticVoidMethod(env, g_clsMain, g_mPickDriver);
+    return true;
+}
+
+// True once the picker is done: *name the installed driver's folder ("" when not installed), *error why not ("" for
+// a cancelled pick).
+bool android_driver_install_poll(char *name, size_t name_cap, char *error, size_t error_cap) {
+    pthread_mutex_lock(&g_drv_mu);
+    bool r = g_drv_ready;
+    if (r) {
+        snprintf(name, name_cap, "%s", g_drv_name);
+        snprintf(error, error_cap, "%s", g_drv_error);
+        g_drv_ready = false;
+    }
+    pthread_mutex_unlock(&g_drv_mu);
+    return r;
 }
 
 void plat_register_dialog_callback(int which, PlatDialogCallback cb, void *userdata) {

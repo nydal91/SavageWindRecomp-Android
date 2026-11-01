@@ -839,8 +839,28 @@ static void tab_display(void) {
     {   // GPU driver (android/vk_dispatch.c): the phone's own or one installed into <files>/drivers (MainActivity)
         static std::vector<std::string> dirs;
         static bool scanned;
+        // Install driver from .zip (below): the picker's result arrives on Java's thread; once it's in, the list is
+        // read again and the new driver chosen
+        static bool installing;
+        static std::string install_msg;
+        if (installing) {
+            char name[64], err[256];
+            if (android_driver_install_poll(name, sizeof name, err, sizeof err)) {
+                installing = false;
+                if (name[0]) {
+                    snprintf(g_settings.gpu_driver, sizeof g_settings.gpu_driver, "%s", name);
+                    settings_save();
+                    scanned = false;
+                    install_msg = std::string("Installed ") + name + " and chose it as the GPU driver. Close Savage "
+                                  "Wind completely and open it again to use it.";
+                } else {
+                    install_msg = err;  // ("" when the pick was cancelled)
+                }
+            }
+        }
         if (!scanned) {
             scanned = true;
+            dirs.clear();
             dirs.push_back("");
             const char *root = getenv("SAVAGEWIND_DRIVERS_DIR");
             if (DIR *d = root ? opendir(root) : NULL) {
@@ -863,6 +883,16 @@ static void tab_display(void) {
         if (opt_choice("GPU driver", &cur, names.data(), (int)names.size(), 0, desc.c_str(), false)) {
             snprintf(g_settings.gpu_driver, sizeof g_settings.gpu_driver, "%s", dirs[cur].c_str());
             settings_save();
+        }
+        std::string idesc = installing ? std::string("Waiting for the file picker...")
+                          : !install_msg.empty() ? install_msg
+                          : std::string("Picks a GPU driver .zip (Mesa Turnip or another Adreno driver in the AdrenoTools "
+                                        "format, with a meta.json inside) from anywhere on the phone, installs it and "
+                                        "chooses it above. It takes effect when Savage Wind starts again.");
+        if (opt_button("Install driver from .zip...", idesc.c_str()) && !installing) {
+            install_msg.clear();
+            installing = android_pick_driver_zip();
+            if (!installing) install_msg = "The file picker could not be opened.";
         }
     }
     if (opt_toggle("GPU max clocks", &g_settings.gpu_turbo, true,

@@ -12,10 +12,12 @@ import java.util.zip.ZipInputStream;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.Context;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.system.Os;
 import android.widget.Toast;
@@ -37,6 +39,7 @@ public class MainActivity extends SDLActivity {
 
     private static final int REQ_PICK_FOLDER = 41;
     private static final int REQ_PICK_FILE = 42;
+    private static final int REQ_PICK_DRIVER = 43;
 
     static Context sContext;  // package-private: Swgen reads it
     private static File sBootLog;
@@ -188,32 +191,95 @@ public class MainActivity extends SDLActivity {
         for (File z : zips) {
             String n = z.getName();
             if (!n.toLowerCase().endsWith(".zip")) continue;
-            File dir = new File(out, n.substring(0, n.length() - 4));
-            File stamp = new File(dir, ".from_zip");
+            File stamp = new File(new File(out, n.substring(0, n.length() - 4)), ".from_zip");
             if (stamp.isFile() && stamp.lastModified() >= z.lastModified()) continue;
-            deleteTree(dir);
-            dir.mkdirs();
-            boolean ok = false;
-            try (ZipInputStream zi = new ZipInputStream(new FileInputStream(z))) {
-                ZipEntry e;
-                byte[] buf = new byte[1 << 16];
-                while ((e = zi.getNextEntry()) != null) {
-                    if (e.isDirectory()) continue;
-                    String name = new File(e.getName()).getName();  // (flat: the driver and meta.json)
-                    if (name.isEmpty() || name.startsWith(".")) continue;
-                    try (OutputStream o = new FileOutputStream(new File(dir, name))) {
-                        int k;
-                        while ((k = zi.read(buf)) > 0) o.write(buf, 0, k);
-                    }
-                    ok |= name.equals("meta.json");
-                }
-                if (ok) new FileOutputStream(stamp).close();
-            } catch (IOException e) {
-                ok = false;
-            }
-            if (!ok) deleteTree(dir);
-            bootLog("drivers: " + n + (ok ? " installed" : " is not an AdrenoTools driver zip (no meta.json)"));
+            unpackDriver(z, out);
         }
+    }
+
+    // One driver zip -> <out>/<zip name without .zip>/ (flat: the driver and meta.json). False (and nothing left
+    // behind) when it isn't an AdrenoTools driver.
+    private boolean unpackDriver(File z, File out) {
+        String n = z.getName();
+        File dir = new File(out, n.substring(0, n.length() - 4));
+        File stamp = new File(dir, ".from_zip");
+        deleteTree(dir);
+        dir.mkdirs();
+        boolean ok = false;
+        try (ZipInputStream zi = new ZipInputStream(new FileInputStream(z))) {
+            ZipEntry e;
+            byte[] buf = new byte[1 << 16];
+            while ((e = zi.getNextEntry()) != null) {
+                if (e.isDirectory()) continue;
+                String name = new File(e.getName()).getName();
+                if (name.isEmpty() || name.startsWith(".")) continue;
+                try (OutputStream o = new FileOutputStream(new File(dir, name))) {
+                    int k;
+                    while ((k = zi.read(buf)) > 0) o.write(buf, 0, k);
+                }
+                ok |= name.equals("meta.json");
+            }
+            if (ok) new FileOutputStream(stamp).close();
+        } catch (IOException e) {
+            ok = false;
+        }
+        if (!ok) deleteTree(dir);
+        bootLog("drivers: " + n + (ok ? " installed" : " is not an AdrenoTools driver zip (no meta.json)"));
+        return ok;
+    }
+
+    // Video > GPU driver > Install driver from .zip (runtime/ui/menu.mm, through android_bridge.c): the system file
+    // picker, any provider (Downloads, Drive...: read through the ContentResolver, no real path needed). The zip is
+    // copied into <external files>/drivers - where installDrivers finds it at every start - and unpacked at once;
+    // nativeOnDriverInstalled gets the folder name the GPU driver setting takes, or null and why not.
+    public static void pickDriverZip() {
+        final MainActivity a = (MainActivity) sContext;
+        a.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed",
+                                                              "application/octet-stream"});
+            try {
+                a.startActivityForResult(i, REQ_PICK_DRIVER);
+            } catch (Exception e) {
+                nativeOnDriverInstalled(null, "No file picker on this phone.");
+            }
+        });
+    }
+
+    private void installPickedDriver(final Uri uri) {
+        new Thread(() -> {
+            String name = null;
+            try (Cursor c = getContentResolver().query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (c != null && c.moveToFirst()) name = c.getString(0);
+            } catch (Exception ignored) {
+            }
+            if (name == null) name = uri.getLastPathSegment();
+            if (name == null) name = "driver.zip";
+            name = new File(name).getName().replaceAll("[^A-Za-z0-9._+-]", "_");
+            if (!name.toLowerCase().endsWith(".zip")) name += ".zip";
+            File in = new File(sBootLog.getParentFile(), "drivers"), out = new File(getFilesDir(), "drivers");  // (the data root: onCreate)
+            in.mkdirs();
+            out.mkdirs();
+            File z = new File(in, name);
+            try (InputStream is = getContentResolver().openInputStream(uri); OutputStream os = new FileOutputStream(z)) {
+                if (is == null) throw new IOException("cannot open");
+                byte[] buf = new byte[1 << 16];
+                int k;
+                while ((k = is.read(buf)) > 0) os.write(buf, 0, k);
+            } catch (IOException e) {
+                z.delete();
+                nativeOnDriverInstalled(null, "Could not read the file.");
+                return;
+            }
+            if (unpackDriver(z, out)) {
+                nativeOnDriverInstalled(name.substring(0, name.length() - 4), null);
+            } else {
+                z.delete();
+                nativeOnDriverInstalled(null, name + " is not an AdrenoTools driver zip (it has no meta.json).");
+            }
+        }).start();
     }
 
     private static void deleteTree(File f) {
@@ -305,6 +371,11 @@ public class MainActivity extends SDLActivity {
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_PICK_DRIVER) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) installPickedDriver(data.getData());
+            else nativeOnDriverInstalled(null, null);  // (cancelled)
+            return;
+        }
         String path = null;
         if (resultCode == RESULT_OK && data != null && data.getData() != null) {
             path = realPath(data.getData());
@@ -341,4 +412,5 @@ public class MainActivity extends SDLActivity {
     static native void nativeSetContext(Context context);
     static native void nativeOnPicked(int requestCode, String path);
     static native void nativeSwgenDone(int handle, int exitCode);
+    static native void nativeOnDriverInstalled(String name, String error);
 }
