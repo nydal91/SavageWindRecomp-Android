@@ -3250,6 +3250,10 @@ static void gw_note(int stage) {  // a shader of this stage that stores to globa
     static int hold = -1;
     if (hold < 0) hold = getenv("SAVAGEWIND_VK_GMEM_HOLD") != NULL;
     if (chunk_hold) return;  // (the rest of the list goes in one piece anyway)
+    // No heap buffer (no host import, no mapped heap: Adreno has neither, and a 128 MB storage buffer range): the
+    // shader's stores go to a scratch buffer, never to guest memory, so there is nothing for copies to wait for.
+    // (Waiting anyway made the GPU idle before every draw: ~0.5 fps in BotW's world on an Adreno 740.)
+    if (!gmem_buf) return;
     bool ok = !hold;
     int n = 0;
     for (int i = 0; i < 16 && ok; i++) {

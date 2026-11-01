@@ -1640,7 +1640,14 @@ int ui_run(void) {
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
+#ifdef __ANDROID__
+        // (SDL_WaitEventTimeout spins on Android - joystick/sensor polling and the clock, a whole big core: heat,
+        // and the game's threads lose that core. Poll, then sleep.)
+        SDL_Delay(4);
+        while (SDL_PollEvent(&e)) {
+#else
         while (SDL_WaitEventTimeout(&e, 16)) {
+#endif
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);
