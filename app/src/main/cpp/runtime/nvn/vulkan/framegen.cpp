@@ -70,6 +70,7 @@ enum { R_OF_VECTOR, R_OF_SCD, R_DILATED_DEPTH, R_DILATED_MV = R_DILATED_DEPTH + 
 
 static struct {
     bool live;
+    bool have_shared, have_of, have_fi, have_res[R_COUNT];  // (what create() got as far as: fg_destroy frees those)
     FgConfig cfg;
     FfxInterface shared, fi_if;
     void *scratch_shared, *scratch_fi;
@@ -125,12 +126,13 @@ static bool make_backend(FfxInterface *i, void **scratch, size_t contexts) {
     return true;
 }
 
+// (also after a create() that failed part way: frees what it made)
 extern "C" void fg_destroy(void) {
-    if (!g.live) return;
-    for (int i = 0; i < R_COUNT; i++) g.shared.fpDestroyResource(&g.shared, g.res[i], g.shared_id);
-    ffxFrameInterpolationContextDestroy(&g.fi);
-    ffxOpticalflowContextDestroy(&g.of);
-    g.shared.fpDestroyBackendContext(&g.shared, g.shared_id);
+    for (int i = 0; i < R_COUNT; i++)
+        if (g.have_res[i]) g.shared.fpDestroyResource(&g.shared, g.res[i], g.shared_id);
+    if (g.have_fi) ffxFrameInterpolationContextDestroy(&g.fi);
+    if (g.have_of) ffxOpticalflowContextDestroy(&g.of);
+    if (g.have_shared) g.shared.fpDestroyBackendContext(&g.shared, g.shared_id);
     scratch_free(g.scratch_shared);
     scratch_free(g.scratch_fi);
     memset(&g, 0, sizeof g);
@@ -140,10 +142,12 @@ static bool create(const FgConfig *c) {
     g.cfg = *c;
     if (!make_backend(&g.shared, &g.scratch_shared, 1) || !make_backend(&g.fi_if, &g.scratch_fi, 2)) return false;
     TRY(g.shared.fpCreateBackendContext(&g.shared, FFX_EFFECT_SHAREDAPIBACKEND, nullptr, &g.shared_id));
+    g.have_shared = true;
     FfxOpticalflowContextDescription od = {};
     od.backendInterface = g.fi_if;
     od.resolution = {c->display_w, c->display_h};
     TRY(ffxOpticalflowContextCreate(&g.of, &od));
+    g.have_of = true;
     FfxFrameInterpolationContextDescription fd = {};
     fd.backendInterface = g.fi_if;
     fd.flags = c->depth_inverted ? FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED : 0;
@@ -152,16 +156,17 @@ static bool create(const FgConfig *c) {
     fd.backBufferFormat = ffxGetSurfaceFormatVK(c->color_format);
     fd.previousInterpolationSourceFormat = ffxGetSurfaceFormatVK(c->hudless_format);
     TRY(ffxFrameInterpolationContextCreate(&g.fi, &fd));
+    g.have_fi = true;
     FfxOpticalflowSharedResourceDescriptions ord = {};
     TRY(ffxOpticalflowGetSharedResourceDescriptions(&g.of, &ord));
-    TRY(g.shared.fpCreateResource(&g.shared, &ord.opticalFlowVector, g.shared_id, &g.res[R_OF_VECTOR]));
-    TRY(g.shared.fpCreateResource(&g.shared, &ord.opticalFlowSCD, g.shared_id, &g.res[R_OF_SCD]));
+    TRY(g.shared.fpCreateResource(&g.shared, &ord.opticalFlowVector, g.shared_id, &g.res[R_OF_VECTOR])); g.have_res[R_OF_VECTOR] = true;
+    TRY(g.shared.fpCreateResource(&g.shared, &ord.opticalFlowSCD, g.shared_id, &g.res[R_OF_SCD])); g.have_res[R_OF_SCD] = true;
     FfxFrameInterpolationSharedResourceDescriptions frd = {};
     TRY(ffxFrameInterpolationGetSharedResourceDescriptions(&g.fi, &frd));
     for (int i = 0; i < 2; i++) {
-        TRY(g.shared.fpCreateResource(&g.shared, &frd.dilatedDepth, g.shared_id, &g.res[R_DILATED_DEPTH + i]));
-        TRY(g.shared.fpCreateResource(&g.shared, &frd.dilatedMotionVectors, g.shared_id, &g.res[R_DILATED_MV + i]));
-        TRY(g.shared.fpCreateResource(&g.shared, &frd.reconstructedPrevNearestDepth, g.shared_id, &g.res[R_PREV_DEPTH + i]));
+        TRY(g.shared.fpCreateResource(&g.shared, &frd.dilatedDepth, g.shared_id, &g.res[R_DILATED_DEPTH + i])); g.have_res[R_DILATED_DEPTH + i] = true;
+        TRY(g.shared.fpCreateResource(&g.shared, &frd.dilatedMotionVectors, g.shared_id, &g.res[R_DILATED_MV + i])); g.have_res[R_DILATED_MV + i] = true;
+        TRY(g.shared.fpCreateResource(&g.shared, &frd.reconstructedPrevNearestDepth, g.shared_id, &g.res[R_PREV_DEPTH + i])); g.have_res[R_PREV_DEPTH + i] = true;
     }
     g.live = true;
     LOG("[fg] FSR 3 frame interpolation %ux%u (render %ux%u, color format %d, hudless %d)\n", c->display_w, c->display_h,
@@ -187,13 +192,21 @@ static FfxResource image(const FgImage *im, const wchar_t *name, bool write) {
 
 static FfxResource shared(int i) { return g.shared.fpGetResource(&g.shared, g.res[i]); }
 
+// A create() that fails (e.g. a pipeline the GPU driver won't build: ffxOpticalflowContextCreate on Turnip/Adreno)
+// fails the same way every time, and each try builds and drops every pipeline again (seconds of GPU stall, per frame:
+// the device froze). So frame generation is off for the rest of the run after one (the frame shown as is).
+static bool g_failed;
 extern "C" bool fg_dispatch(VkCommandBuffer cb, const FgConfig *c, const FgFrame *f) {
+    if (g_failed) return false;
     if (g.live && memcmp(&g.cfg, c, sizeof *c)) {
         g_fg_vk.wait_idle();
         fg_destroy();
     }
     if (!g.live && !create(c)) {
+        g_fg_vk.wait_idle();
         fg_destroy();
+        g_failed = true;
+        LOG("[fg] frame generation unavailable on this GPU/driver: off until the game restarts\n");
         return false;
     }
     FfxCommandList cl = ffxGetCommandListVK(cb);
