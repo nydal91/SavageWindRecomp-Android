@@ -122,6 +122,43 @@ store:
     return 0xffffffffu;
 }
 
+// The stream's 16-byte header (the game's reader, 1.9.0 0x700131d574, which the decoder calls first while +0x1a, the
+// header bytes still to read, is nonzero): "Yaz0", then the output size big-endian into +8, then 8 bytes it skips. A
+// header can arrive split over chunks. At its end the size is cut to +0xc when that is positive and smaller. Returns
+// the bytes it took (the count it started from when it finishes), or -1 for a wrong magic byte.
+static int32_t yaz0_header(uint8_t *s, const uint8_t *src, uint32_t len) {
+    uint32_t start = s[0x1a];
+    for (uint32_t i = 0; s[0x1a]; i++) {
+        uint32_t c = --s[0x1a];  // (stored before the byte is looked at, as the game's code does)
+        if (c >= 12) {
+            if (src[i] != (uint8_t)"Yaz0"[15 - c]) return -1;
+        } else if (c >= 8) {
+            uint32_t size; memcpy(&size, s + 8, 4);
+            size |= (uint32_t)src[i] << ((c & 3) * 8);
+            memcpy(s + 8, &size, 4);
+        }
+        if (c && i == len - 1) return (int32_t)(i + 1);  // the chunk ends inside the header
+    }
+    int32_t cut, size; memcpy(&cut, s + 0xc, 4); memcpy(&size, s + 8, 4);
+    if (cut >= 1 && cut < size) memcpy(s + 8, &cut, 4);
+    return (int32_t)start;
+}
+
+// The decoder's start: the header while some of it is still to read, then the rest of the chunk goes on to yaz0_run.
+// True when the call ends here (*res its result): a wrong magic, or a chunk that ends inside or right at the header's end.
+static bool yaz0_head(uint8_t *s, const uint8_t **src, uint32_t *len, uint32_t *res) {
+    if (!s[0x1a]) return false;
+    int32_t n = yaz0_header(s, *src, *len);
+    if (n < 0) { *res = (uint32_t)n; return true; }
+    if (!(*len -= (uint32_t)n)) {
+        int32_t rem; memcpy(&rem, s + 8, 4);
+        *res = s[0x1a] ? 0xffffffffu : (uint32_t)rem;
+        return true;
+    }
+    *src += n;
+    return false;
+}
+
 // (SAVAGEWIND_YAZ0=2) the native result of the call in progress on this thread, checked at the game code's return
 static __thread struct {
     bool on, stored;
@@ -133,29 +170,38 @@ static __thread struct {
 } chk;
 static uint64_t chk_calls, chk_bad;
 
-// The decoder's entry: 1 when done here (x0 set; the game's code is skipped), 0 for the game's code (the header still to
-// read, an empty chunk, SAVAGEWIND_YAZ0=0, or the check mode).
+// The decoder's entry: 1 when done here (x0 set; the game's code is skipped), 0 for the game's code (an empty chunk,
+// SAVAGEWIND_YAZ0=0, or the check mode). A whole file in one chunk, header and all, comes here too: declined, it was
+// decoded in generated code, 20 to 30 ms on the loading thread the main thread waits for (frames of 50 to 60 ms).
 int rt_yaz0(Cpu *c) {
     int mode = yaz0_mode();
     uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
     const uint8_t *src = (const uint8_t *)(uintptr_t)c->x[1];
-    uint32_t len = (uint32_t)c->x[2];
-    if (!mode || s[0x1a] || !len) return 0;
+    uint32_t len = (uint32_t)c->x[2], res;
+    if (!mode || !len) return 0;
     uint64_t d; memcpy(&d, s, 8);
     if (mode != 2) {
         bool stored;
-        c->x[0] = yaz0_run(s, (uint8_t *)(uintptr_t)d, src, len, &stored);
+        c->x[0] = yaz0_head(s, &src, &len, &res) ? res : yaz0_run(s, (uint8_t *)(uintptr_t)d, src, len, &stored);
         return 1;
     }
     // check mode: on a copy of the state and of the output (and the 4 KB before it, which copies read)
-    int32_t rem; memcpy(&rem, s + 8, 4);
+    memcpy(chk.state, s, 0x1c);
+    bool ended = yaz0_head(chk.state, &src, &len, &res);
+    memcpy(chk.before, chk.state, 0x1c);  // (the header's part is written even where the decoder's state is not)
+    if (ended) {
+        free(chk.out);
+        chk.out = malloc(1);
+        chk.result = res, chk.stored = false, chk.n = 0;
+        chk.on = chk.out != NULL, chk.s = s, chk.dst = (uint8_t *)(uintptr_t)d;
+        return 0;
+    }
+    int32_t rem; memcpy(&rem, chk.state + 8, 4);
     uint64_t room = rem > 0 ? (uint64_t)rem : 0;
     if (room > (64u << 20) || d < GUEST_LO + 0x1000 || d + room > GUEST_HI) return 0;
     uint8_t *buf = malloc(0x1000 + room + 16);
     if (!buf) return 0;
     memcpy(buf, (const void *)(uintptr_t)(d - 0x1000), 0x1000);
-    memcpy(chk.before, s, 0x1c);
-    memcpy(chk.state, s, 0x1c);
     uint8_t *ndst = buf + 0x1000;
     chk.result = yaz0_run(chk.state, ndst, src, len, &chk.stored);
     uint64_t end; memcpy(&end, chk.state, 8);
@@ -182,6 +228,6 @@ void rt_yaz0_done(Cpu *c) {
         LOG("[yaz0] check MISMATCH: game result %x native %x, %llu bytes\n", (unsigned)c->x[0], chk.result,
             (unsigned long long)chk.n);
     }
-    if (!(n & 1023) || !ok) LOG("[yaz0] check: %llu calls, %llu mismatches\n", (unsigned long long)n,
+    if (!(n & (n - 1)) || !(n & 1023) || !ok) LOG("[yaz0] check: %llu calls, %llu mismatches\n", (unsigned long long)n,
                                 (unsigned long long)chk_bad);
 }

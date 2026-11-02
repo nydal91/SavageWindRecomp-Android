@@ -934,6 +934,17 @@ bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 // (SAVAGEWIND_VK_PROF) called once per presented frame: frames over 50 ms are logged with where their time went.
 // present_ns: time in backend_present's acquire/blit/present.
 extern uint64_t g_pace_sleep_ns;  // (objects.c present_pace)
+// CLOCK_MONOTONIC seconds at the end of a hitch: the clock `simpleperf record --clockid monotonic` stamps samples with,
+// so the samples inside a slow frame can be picked out
+static double mono_s(void) {
+#ifdef _WIN32
+    return SDL_GetTicksNS() / 1e9;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+#endif
+}
 void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     if (!prof) return;
     static uint64_t last_t, l_exec, l_wait, l_xwait, l_draws, l_subs, l_comp, l_valloc, hitch_ns;
@@ -946,13 +957,13 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
         extern uint64_t g_present_split[6];
         LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f, compiles %.1f) + present %.1f (acquire %.1f "
             "end %.1f draw %.1f submit %.1f present %.1f slot %.1f) + other %.1f (pace %.1f); %llu draws, %llu submits, compiles %d pending; "
-            "exec waits %.1f; vkAllocateMemory %.1f\n",
+            "exec waits %.1f; vkAllocateMemory %.1f; mono %.3f\n",
             (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, (comp - l_comp) / 1e6, present_ns / 1e6,
             g_present_split[0] / 1e6, g_present_split[1] / 1e6, g_present_split[2] / 1e6, g_present_split[3] / 1e6,
             g_present_split[4] / 1e6, g_present_split[5] / 1e6,
             ((double)dt - ex - present_ns) / 1e6, g_pace_sleep_ns / 1e6, (unsigned long long)(cum_draws - l_draws),
             (unsigned long long)(cum_submits - l_subs),
-            atomic_load(&stat_compiles), (cum_xwait - l_xwait) / 1e6, (valloc - l_valloc) / 1e6);
+            atomic_load(&stat_compiles), (cum_xwait - l_xwait) / 1e6, (valloc - l_valloc) / 1e6, mono_s());
     }
     { extern uint64_t g_present_split[6]; memset(g_present_split, 0, sizeof g_present_split); }
     g_pace_sleep_ns = 0;
