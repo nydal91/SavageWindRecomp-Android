@@ -1850,10 +1850,12 @@ static void begin_pass(void) {
         }
         if (!v) continue;
         if (pass_detached & (1u << i)) continue;  // (left out: this pass doesn't draw into it, det_tab)
-        if (g_vk.is_mali) {  // The same view in two slots (BOTW's G-buffer binds targets 1 / 3 again as 2 / 4, never writing
-            // those): attached once on Mali. Twice is undefined in Vulkan, and a tiler stores each slot's tile copy at the end
-            // of the pass, so the unwritten slot put the loaded contents back over the drawn ones (the shrine's G-buffer:
-            // specks / tiles). Other GPUs: attached as before (the pipelines' rendering formats unchanged).
+        if (g_vk.dedup_targets) {  // The same view in two slots (BOTW's G-buffer binds targets 1 / 3 again as 2 / 4, never
+            // writing those): attached once on tilers. Twice is undefined in Vulkan, and a tiler stores each slot's tile copy
+            // at the end of the pass, so the unwritten slot put the loaded contents back over the drawn ones (Mali: the
+            // shrine's G-buffer, specks / tiles; Adreno / Turnip, in the passes it renders in GMEM: the whole room's normals
+            // and material gone, so Kakariko's clothes shop went black with the 64x64 cube capture for walls at some camera
+            // angles). Other GPUs: attached as before (the pipelines' rendering formats unchanged).
             int dup = -1;
             for (int j = 0; j < i && dup < 0; j++) if (ca[j].imageView == v) dup = j;
             if (dup >= 0) {

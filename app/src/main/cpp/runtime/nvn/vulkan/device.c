@@ -155,6 +155,10 @@ static void pick_device(void) {
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
     g_vk.is_mali = g_vk.props.vendorID == 0x13B5;  // (Arm)
+    {   // tilers (Mali, Adreno: vendor 0x5143) keep a tile copy per slot; SAVAGEWIND_VK_DEDUP_TARGETS=0/1 overrides
+        const char *e = getenv("SAVAGEWIND_VK_DEDUP_TARGETS");
+        g_vk.dedup_targets = e ? atoi(e) != 0 : g_vk.is_mali || g_vk.props.vendorID == 0x5143;
+    }
     { extern void vk_translator_setup(void); vk_translator_setup(); }
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);

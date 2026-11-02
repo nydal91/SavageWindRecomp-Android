@@ -36,6 +36,7 @@ typedef struct {
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
     bool is_mali;              // Arm Mali (vendor 0x13B5): the Mali-only paths' default (tiler / non-coherent workarounds)
+    bool dedup_targets;        // a view in two render target slots attached once (tilers: Mali, Adreno; exec.c begin_pass)
     VkPipelineCache pcache;
     VkPipelineCache pcache_pre;  // the precompiled shaders' libraries (cache/vk_precompiled.bin; read only while playing)
     VkSemaphore timeline;      // value = last completed submission number
