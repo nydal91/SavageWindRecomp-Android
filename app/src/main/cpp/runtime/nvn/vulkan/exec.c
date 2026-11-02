@@ -8,7 +8,9 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../../kernel.h"
@@ -106,6 +108,8 @@ static _Atomic int stat_compiles;  // programs and pipelines built where first n
 static _Atomic int stat_warm;      // ... found built: by the pre-warm (pso_init) or for other programs with the same stages
 static void pso_init(void);
 static _Atomic uint64_t prof_c_tr, prof_c_prog, prof_c_pipe, prof_c_comp, prof_c_ntr, prof_c_nprog, prof_c_npipe;  // (VK_PROF) compile ns / counts
+static _Atomic uint64_t prof_c_opt;                      // (VK_PROF) optimized pipelines' build ns (opt_worker)
+static _Atomic int opt_queued, opt_built, opt_failed;    // optimized pipelines waiting, built, failed (opt_queue)
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 static char stats_text[2048];
@@ -1044,6 +1048,11 @@ const char *renderer_stats(void) {
                  atomic_exchange(&prof_c_prog, 0) / 1e6, (unsigned long long)atomic_exchange(&prof_c_nprog, 0),
                  atomic_exchange(&prof_c_pipe, 0) / 1e6, (unsigned long long)atomic_exchange(&prof_c_npipe, 0),
                  atomic_exchange(&prof_c_comp, 0) / 1e6);
+        if (g_vk.gpl) {
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | optimized pipelines: %d built (%.0f ms), %d waiting, %d failed",
+                     atomic_load(&opt_built), atomic_exchange(&prof_c_opt, 0) / 1e6, atomic_load(&opt_queued), atomic_load(&opt_failed));
+        }
         prof_views_created = 0;
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
@@ -2433,6 +2442,11 @@ static void ubo_dynamic_mark_stage(VkBindingInfo *b, int n, uint32_t set) {
     uint32_t lim = g_vk.props.limits.maxDescriptorSetUniformBuffersDynamic, k = 0;
     if (lim > 32) lim = 32;
     uint32_t share = set == 0 ? (lim + 1) / 2 : lim / 2;
+    // Turnip places a set's dynamic uniform buffers after those of the sets before it in the layout, and compiles a
+    // fragment shader library against the library's layout, where set 0 is empty: linked, the fragment shader read the
+    // vertex set's buffers (the scene drew black). So there the vertex set takes them all and the fragment set none:
+    // with no dynamic buffers in set 0, set 1's start at 0 in both layouts.
+    if (g_vk.turnip) share = set == 0 ? lim : 0;
     for (int i = 0; i < n && k < share; i++)
         if (b[i].set == set && b[i].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b[i].binding >= 3 && b[i].binding < 17) {
             b[i].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -2944,7 +2958,9 @@ typedef struct {
 } PipeState;
 typedef struct { Prog *prog; PipeState s; } PipeKey;
 
-typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+struct WarmPipe;
+typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; struct WarmPipe *warm; } Pipe;  // state: 0 building, 1 ready, 2 failed
+// (warm: where an optimized pipeline replaces a linked one, make_graphics; NULL for those made whole)
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
 static struct { PipeKey k; Pipe *pp; } pipe_memo;  // (see prog_memo)
@@ -2981,12 +2997,20 @@ static void cache_feedback(const VkPipelineCreationFeedback *fb) {
 
 static VkResult create_pipeline_in(const PipeState *k, VkShaderModule vsm, VkShaderModule fsm, VkPipelineLayout layout,
                                    VkPipelineCache cache, VkPipeline *out);
+static VkResult create_pipeline_flags(const PipeState *k, VkShaderModule vsm, VkShaderModule fsm, VkPipelineLayout layout,
+                                      VkPipelineCache cache, VkPipelineCreateFlags flags, VkPipeline *out);
 static VkResult create_pipeline(const PipeState *k, VkShaderModule vsm, VkShaderModule fsm, VkPipelineLayout layout, VkPipeline *out) {
     return create_pipeline_in(k, vsm, fsm, layout, g_vk.pcache, out);
 }
 
 static VkResult create_pipeline_in(const PipeState *k, VkShaderModule vsm, VkShaderModule fsm, VkPipelineLayout layout,
                                    VkPipelineCache cache, VkPipeline *out) {
+    return create_pipeline_flags(k, vsm, fsm, layout, cache, 0, out);
+}
+
+// flags: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT looks it up in cache only (no compile)
+static VkResult create_pipeline_flags(const PipeState *k, VkShaderModule vsm, VkShaderModule fsm, VkPipelineLayout layout,
+                                      VkPipelineCache cache, VkPipelineCreateFlags flags, VkPipeline *out) {
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vsm, .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fsm, .pName = "main"}};
@@ -3044,10 +3068,12 @@ static VkResult create_pipeline_in(const PipeState *k, VkShaderModule vsm, VkSha
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = layout,
-                                       .flags = k->feedback ? VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT : 0};
+                                       .flags = flags | (k->feedback ? VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT : 0)};
     *out = VK_NULL_HANDLE;
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, cache, 1, &pi, NULL, out);
-    if (r != VK_SUCCESS) {
+    if (r == VK_PIPELINE_COMPILE_REQUIRED) {
+        *out = VK_NULL_HANDLE;  // (lookup only: not in that cache)
+    } else if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
     } else if (cache == g_vk.pcache) {
@@ -3284,10 +3310,113 @@ static VkPipeline gpl_state_lib(const PipeState *s, bool output) {
     return p;
 }
 
-// A graphics pipeline: linked from libraries (g_vk.gpl), else whole
+// ---- optimized pipelines in place of linked ones (g_vk.gpl). A pipeline fast-linked from libraries skips the
+// optimizations across the stages (unused outputs, the varyings' layout): on Turnip (Adreno 740) the open world's GPU
+// time per frame was ~15% longer with linked pipelines than with whole ones. So a linked pipeline is used at once and
+// the whole pipeline is built behind it, on low-priority threads of its own, into the pipeline cache; it then replaces
+// the linked one (WarmPipe.opt: draws take it at their next bind, the linked one is destroyed some frames later).
+// Next time the whole pipeline is in the cache and made at once (make_graphics: looked up first, no compile).
+// SAVAGEWIND_VK_NO_OPT_PIPELINES=1: linked pipelines stay.
+typedef struct OptJob {
+    struct WarmPipe *w;
+    PipeState s;
+    VkShaderModule vsm, fsm;
+    VkPipelineLayout layout;
+    struct OptJob *next;
+} OptJob;
+typedef struct Retired { VkPipeline p; uint64_t frame; struct Retired *next; } Retired;
+static OptJob *opt_head, *opt_tail;
+static Retired *opt_retired;
+static pthread_mutex_t opt_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t opt_cond = PTHREAD_COND_INITIALIZER;
+static void opt_swap(struct WarmPipe *w, VkPipeline p);
+
+static bool opt_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("SAVAGEWIND_VK_NO_OPT_PIPELINES") == NULL;
+    return on;
+}
+
+// The linked pipelines that were replaced, destroyed once no frame in flight can still bind them
+static void opt_reap(bool locked) {
+    extern uint64_t vk_frame_counter(void);
+    uint64_t now = vk_frame_counter();
+    if (!locked) pthread_mutex_lock(&opt_lock);
+    Retired **pr = &opt_retired, *dead = NULL;
+    while (*pr) {
+        Retired *r = *pr;
+        if (now >= r->frame + 30) { *pr = r->next; r->next = dead; dead = r; }
+        else pr = &r->next;
+    }
+    if (!locked) pthread_mutex_unlock(&opt_lock);
+    while (dead) { Retired *n = dead->next; vkDestroyPipeline(g_vk.dev, dead->p, NULL); free(dead); dead = n; }
+}
+
+static void *opt_worker(void *arg) {
+    (void)arg;
+#ifdef __linux__
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 10);  // (behind the game, the queue and the build workers)
+#endif
+    for (;;) {
+        pthread_mutex_lock(&opt_lock);
+        while (!opt_head) {
+            if (opt_retired) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_sec += 1;
+                pthread_cond_timedwait(&opt_cond, &opt_lock, &ts);
+                pthread_mutex_unlock(&opt_lock);
+                opt_reap(false);
+                pthread_mutex_lock(&opt_lock);
+            } else {
+                pthread_cond_wait(&opt_cond, &opt_lock);
+            }
+        }
+        OptJob *j = opt_head;
+        opt_head = j->next;
+        if (!opt_head) opt_tail = NULL;
+        pthread_mutex_unlock(&opt_lock);
+        VkPipeline p = VK_NULL_HANDLE;
+        uint64_t t0 = SDL_GetTicksNS();
+        if (create_pipeline(&j->s, j->vsm, j->fsm, j->layout, &p) == VK_SUCCESS && p) {
+            opt_swap(j->w, p);
+            atomic_fetch_add(&opt_built, 1);
+        } else {
+            atomic_fetch_add(&opt_failed, 1);
+        }
+        atomic_fetch_add(&prof_c_opt, SDL_GetTicksNS() - t0);
+        atomic_fetch_sub(&opt_queued, 1);
+        free(j);
+        opt_reap(false);
+    }
+    return NULL;
+}
+
+static void opt_queue(struct WarmPipe *w, const PipeState *s, VkShaderModule vsm, VkShaderModule fsm, VkPipelineLayout layout) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    void opt_start(void);
+    pthread_once(&once, opt_start);
+    OptJob *j = calloc(1, sizeof *j);
+    j->w = w, j->s = *s, j->vsm = vsm, j->fsm = fsm, j->layout = layout;
+    atomic_fetch_add(&opt_queued, 1);
+    pthread_mutex_lock(&opt_lock);
+    if (opt_tail) opt_tail->next = j; else opt_head = j;
+    opt_tail = j;
+    pthread_cond_signal(&opt_cond);
+    pthread_mutex_unlock(&opt_lock);
+}
+void opt_start(void) {
+    for (int i = 0; i < 2; i++) { pthread_t t; pthread_create(&t, NULL, opt_worker, NULL); pthread_detach(t); }
+}
+
+// A graphics pipeline: linked from libraries (g_vk.gpl), else whole. With libraries, the whole pipeline when the
+// pipeline cache has it, else linked and the whole one queued for w (opt_queue; w NULL: linked only).
 static VkResult make_graphics(const PipeState *s, StageBuild *v, StageBuild *f, VkShaderModule vsm, VkShaderModule fsm,
-                              VkPipelineLayout layout, VkPipeline *out) {
+                              VkPipelineLayout layout, struct WarmPipe *w, VkPipeline *out) {
     if (g_vk.gpl && v && f && !s->feedback) {
+        if (opt_on() && create_pipeline_flags(s, vsm, fsm, layout, g_vk.pcache, VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT,
+                                              out) == VK_SUCCESS)
+            return VK_SUCCESS;
         VkPipeline libs[4] = {gpl_state_lib(s, false), gpl_stage_lib(v, STAGE_VERTEX, s), gpl_stage_lib(f, STAGE_FRAGMENT, s),
                               gpl_state_lib(s, true)};
         if (libs[0] && libs[1] && libs[2] && libs[3]) {
@@ -3296,7 +3425,10 @@ static VkResult make_graphics(const PipeState *s, StageBuild *v, StageBuild *f, 
             VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li, .layout = layout};
             *out = VK_NULL_HANDLE;
             VkResult r = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &pi, NULL, out);
-            if (r == VK_SUCCESS) return r;
+            if (r == VK_SUCCESS) {
+                if (w && opt_on()) opt_queue(w, s, vsm, fsm, layout);
+                return r;
+            }
             static int n;
             if (n++ < 10) LOG("[vk] pipeline link failed: %d (made whole)\n", r);
         }
@@ -3313,11 +3445,29 @@ typedef struct WarmPipe {
     VkPipeline pipe;
     _Atomic int state;  // 1 being built, 2 ready, 3 failed
     struct WarmPipe *next;
+    _Atomic(VkPipeline) opt;  // the whole pipeline that replaced pipe (linked), once built (opt_queue)
 } WarmPipe;
+
 #define WARM_TAB 16384
 static WarmPipe *warm_tab[WARM_TAB];
 static pthread_mutex_t warm_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t warm_cond = PTHREAD_COND_INITIALIZER;
+
+static void opt_swap(WarmPipe *w, VkPipeline p) {
+    extern uint64_t vk_frame_counter(void);
+    pthread_mutex_lock(&warm_lock);
+    VkPipeline old = w->pipe;
+    atomic_store(&w->opt, p);
+    w->pipe = p;
+    pthread_mutex_unlock(&warm_lock);
+    Retired *r = malloc(sizeof *r);
+    r->p = old;
+    pthread_mutex_lock(&opt_lock);
+    r->frame = vk_frame_counter();
+    r->next = opt_retired;
+    opt_retired = r;
+    pthread_mutex_unlock(&opt_lock);
+}
 
 // true: made here, state 1 (the caller builds it, then warm_done); false: there already, and built.
 static bool warm_get(const ShaderInfo *vi, const ShaderInfo *fi, const PipeState *s, WarmPipe **out) {
@@ -3345,14 +3495,14 @@ static bool warm_get(const ShaderInfo *vi, const ShaderInfo *fi, const PipeState
 }
 
 // The pipeline, if one with these stages and state is built already (asynchronous shaders: no job, no skipped draw).
-static VkPipeline warm_ready(const ShaderInfo *vi, const ShaderInfo *fi, const PipeState *s) {
+static WarmPipe *warm_ready(const ShaderInfo *vi, const ShaderInfo *fi, const PipeState *s) {
     uint64_t h = hash_words((uint64_t)pair_slot(vi, fi) * 0x9E3779B97F4A7C15ull, s, sizeof *s);
     pthread_mutex_lock(&warm_lock);
     WarmPipe *w = warm_tab[h & (WARM_TAB - 1)];
     while (w && !(w->hash == h && w->vi == vi && w->fi == fi && !memcmp(&w->s, s, sizeof *s))) w = w->next;
-    VkPipeline p = w && atomic_load(&w->state) == 2 ? w->pipe : VK_NULL_HANDLE;
+    if (w && atomic_load(&w->state) != 2) w = NULL;
     pthread_mutex_unlock(&warm_lock);
-    return p;
+    return w;
 }
 
 static void warm_done(WarmPipe *w, VkPipeline p, VkResult r) {
@@ -3372,7 +3522,7 @@ static void build_pipeline(void *arg) {
     WarmPipe *w;
     if (warm_get(k->prog->vi, k->prog->fi, &k->s, &w)) {
         VkPipeline p;
-        VkResult r = make_graphics(&k->s, k->prog->stages.v, k->prog->stages.f, k->prog->vs, k->prog->fs, k->prog->layout, &p);
+        VkResult r = make_graphics(&k->s, k->prog->stages.v, k->prog->stages.f, k->prog->vs, k->prog->fs, k->prog->layout, w, &p);
         warm_done(w, p, r);
         if (r == VK_SUCCESS) pso_record(1, vk_translate_id(k->prog->vi), vk_translate_id(k->prog->fi), &k->s, sizeof k->s);
         atomic_fetch_add(&stat_compiles, 1);
@@ -3380,6 +3530,7 @@ static void build_pipeline(void *arg) {
     } else {
         atomic_fetch_add(&stat_warm, 1);
     }
+    pp->warm = w;
     pp->pipe = w->pipe;
     atomic_store(&pp->state, atomic_load(&w->state) == 2 ? 1 : 2);
 }
@@ -6254,7 +6405,7 @@ static void pso_warm_one(const PsoRec *r) {
         WarmPipe *w;
         if (!warm_get(vi, fi, &r->u.g, &w)) { atomic_fetch_add(&pso_found, 1); return; }
         VkPipeline p;
-        VkResult res = make_graphics(&r->u.g, b->v, b->f, b->vs, b->fs, b->layout, &p);
+        VkResult res = make_graphics(&r->u.g, b->v, b->f, b->vs, b->fs, b->layout, w, &p);
         warm_done(w, p, res);
     } else {
         ShaderInfo *si = vk_translate_load_id(r->id[0], STAGE_COMPUTE);
@@ -7016,8 +7167,13 @@ static void draw_(CmdRec *r, bool indexed) {
             pp->k = k;
             pipe_tab[pslot].key = ph;
             pipe_tab[pslot].pipe = pp;
-            VkPipeline ready = sync_shaders() ? VK_NULL_HANDLE : warm_ready(pr->vi, pr->fi, &k.s);
-            if (ready) { pp->pipe = ready; atomic_store(&pp->state, 1); atomic_fetch_add(&stat_warm, 1); }
+            WarmPipe *ready = sync_shaders() ? NULL : warm_ready(pr->vi, pr->fi, &k.s);
+            if (ready) {
+                pp->warm = ready;
+                pp->pipe = ready->pipe;
+                atomic_store(&pp->state, 1);
+                atomic_fetch_add(&stat_warm, 1);
+            }
             else if (build_deferred()) queue_job(build_pipeline, pp);
             else run_job(build_pipeline, pp);
         }
@@ -7036,6 +7192,10 @@ have_pipe:;
     }
     if (no_dyn_cache) vk_dyn_forget();
     dyn_check();
+    if (!bind_later && pp->warm) {  // (a linked pipeline whose optimized one is built: opt_swap)
+        VkPipeline o = atomic_load_explicit(&pp->warm->opt, memory_order_acquire);
+        if (o && o != pp->pipe) pp->pipe = o;
+    }
     if (bind_later) {  // (its key: the Pipe's address, odd - no driver handle is - so another can't match it)
         if (!DYN_SAME(pipe, (VkPipeline)((uintptr_t)pp | 1))) rec_CmdBindPipelineWhenBuilt(cb, &pp->pipe, &pp->state);
     } else if (!DYN_SAME(pipe, pp->pipe)) {

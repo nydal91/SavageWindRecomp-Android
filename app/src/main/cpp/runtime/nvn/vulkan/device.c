@@ -310,6 +310,7 @@ static void create_device(void) {
     g_vk.radv = drv.driverID == VK_DRIVER_ID_MESA_RADV;
 #endif
     g_vk.amd_proprietary = drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
+    g_vk.turnip = drv.driverID == VK_DRIVER_ID_MESA_TURNIP;
     {   // (for bug reports: the driver's version, and whether ASTC textures reach the GPU as they are or decoded)
         VkFormatProperties ap;
         vkGetPhysicalDeviceFormatProperties(g_vk.phys, VK_FORMAT_ASTC_4x4_UNORM_BLOCK, &ap);
@@ -360,9 +361,9 @@ static void create_device(void) {
     // Pipelines linked from shaders compiled apart from the fixed state (exec.c, graphics pipeline libraries), when
     // the driver links them fast. SAVAGEWIND_VK_NO_GPL=1: whole pipelines, as before. RADV on RDNA 4 (Mesa 26.0, an
     // RX 9070 XT) hung the GPU ~46 s in, at the title screen, with them and ran without (#228); SAVAGEWIND_VK_GPL=1
-    // turns them on there anyway. Mesa Turnip (Adreno) too: linked pipelines drew the 3D scene and the title picture
-    // wrong - white or black - in Turnip 27.0 on an Adreno 740; whole pipelines draw it right.
-    bool gpl_off = (win_legacy || radv_gfx12() || drv.driverID == VK_DRIVER_ID_MESA_TURNIP) && !getenv("SAVAGEWIND_VK_GPL");
+    // turns them on there anyway. On Mesa Turnip (Adreno) linked pipelines drew the 3D scene and the title picture
+    // black until the fragment set lost its dynamic uniform buffers there (exec.c ubo_dynamic_mark_stage).
+    bool gpl_off = (win_legacy || radv_gfx12()) && !getenv("SAVAGEWIND_VK_GPL");
     bool gpl = !getenv("SAVAGEWIND_VK_NO_GPL") && !gpl_off && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
                has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
     // when each frame reached the display (SAVAGEWIND_LOG_PRESENT, tests: "present timing" below)
