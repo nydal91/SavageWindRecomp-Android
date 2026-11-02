@@ -40,6 +40,29 @@ file(APPEND "${GAMELIB_ID_INPUT}" "${GENFLAGS_ID}\n")
 file(SHA256 "${GAMELIB_ID_INPUT}" GAMELIB_ID_HASH)
 string(SUBSTRING "${GAMELIB_ID_HASH}" 0 16 GAMELIB_ID)
 message(STATUS "GAMELIB_ID: ${GAMELIB_ID}")
+# The hash is taken when CMake configures: without this an edit to these files left the old id in place until
+# something else made CMake configure again (the APKs up to 0.4.1-alpha.4-android.3 carried one from before the
+# upstream sync, so a game code library made by older tools passed as current)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GAMELIB_ID_FILES})
+
+# ------------------------------------------------------------------ TRANSLATOR_ID / SPIRV_ID
+# What translated shaders and their SPIR-V are made from, hashed as the Makefile does (the same ids as a desktop
+# build of the same sources). The shader caches - cache/xlate, cache/spirv, the pipeline cache and list, the
+# precompile - are kept while these stay the same. Without them translate.c and spirv.c fall back to their compile
+# time, so every build that recompiled either one threw all those caches away on the player's phone.
+set(TRANSLATOR_ID_INPUT "${CMAKE_BINARY_DIR}/translator_id_input")
+file(READ "${RUNTIME}/nvn/maxwell/translate.c" CONTENT)
+file(WRITE "${TRANSLATOR_ID_INPUT}" "${CONTENT}")
+file(READ "${RUNTIME}/nvn/maxwell/shader.h" CONTENT)
+file(APPEND "${TRANSLATOR_ID_INPUT}" "${CONTENT}")
+file(SHA256 "${TRANSLATOR_ID_INPUT}" TRANSLATOR_ID_HASH)
+string(SUBSTRING "${TRANSLATOR_ID_HASH}" 0 16 TRANSLATOR_ID)
+file(SHA256 "${RUNTIME}/nvn/vulkan/spirv.c" SPIRV_ID_HASH)
+string(SUBSTRING "${SPIRV_ID_HASH}" 0 16 SPIRV_ID)
+message(STATUS "TRANSLATOR_ID: ${TRANSLATOR_ID}, SPIRV_ID: ${SPIRV_ID}")
+# (an edit to these files runs this again, so the ids follow)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${RUNTIME}/nvn/maxwell/translate.c" "${RUNTIME}/nvn/maxwell/shader.h" "${RUNTIME}/nvn/vulkan/spirv.c")
 
 # ------------------------------------------------------------------ sources
 file(GLOB RT_SRC ${RUNTIME}/*.c ${RUNTIME}/hle/*.c ${RUNTIME}/services/*.c
@@ -74,6 +97,9 @@ target_compile_definitions(main PRIVATE
 # gamebuild.c / gamelib.c carry the game-code build's flags (as the Makefile's -D does)
 set_source_files_properties(${RUNTIME}/gamebuild.c ${RUNTIME}/gamelib.c PROPERTIES
     COMPILE_DEFINITIONS "GAMELIB_CFLAGS=\"-O1 -fno-strict-aliasing\";GAMELIB_SHARED=\"-shared\"")
+# (only the two files that use them: a new id recompiles those, not the whole runtime)
+set_source_files_properties(${RUNTIME}/nvn/maxwell/translate.c PROPERTIES COMPILE_DEFINITIONS "TRANSLATOR_ID=\"${TRANSLATOR_ID}\"")
+set_source_files_properties(${RUNTIME}/nvn/vulkan/spirv.c PROPERTIES COMPILE_DEFINITIONS "SPIRV_ID=\"${SPIRV_ID}\"")
 
 # the SMAA reference shader textures live next to the embedded shader string (as the Makefile's -I)
 target_include_directories(main PRIVATE ${SMAA}/Textures)
