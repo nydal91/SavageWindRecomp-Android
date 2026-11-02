@@ -6678,9 +6678,12 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed);
 // draw copies those pixels of its first target afterwards (its own pass), and vk_pick_report logs, per point, the
 // draws that changed it ("[pick]"): the last one is what the frame shows there. SAVAGEWIND_DEBUG_PICK_RT=<i>: target i
 // of each pass instead of the first (a G-buffer's albedo, say), skipping passes that have none.
+// SAVAGEWIND_DEBUG_PICK_FS=<hash>[,<hash>...]: only draws with those fragment shaders (each one stalls the GPU).
 typedef struct { uint64_t vs, fs, hash; void *img; uint32_t w, h, fmt, no; } PickRec;
 static struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; int n, npt, on, rt; int pt[4][2]; uint32_t draws; PickRec rec[4096]; } pick = {.on = -1};
 
+static uint64_t pick_fs[16];
+static int pick_nfs;
 static void pick_after_draw(void) {
     if (pick.on < 0) {
         pick.on = 0;
@@ -6694,8 +6697,20 @@ static void pick_after_draw(void) {
         const char *rt = getenv("SAVAGEWIND_DEBUG_PICK_RT");
         pick.rt = rt ? atoi(rt) : 0;
         if (pick.rt < 0 || pick.rt > 7) pick.rt = 0;
+        for (const char *e = getenv("SAVAGEWIND_DEBUG_PICK_FS"); e && *e && pick_nfs < 16;) {
+            char *end;
+            pick_fs[pick_nfs] = strtoull(e, &end, 16);
+            if (end == e) break;
+            pick_nfs++;
+            e = *end == ',' ? end + 1 : end;
+        }
     }
     pick.draws++;
+    if (pick_nfs) {
+        int k = 0;
+        while (k < pick_nfs && pick_fs[k] != g_cur_fs_hash) k++;
+        if (k == pick_nfs) return;
+    }
     const int t = pick.rt;
     if (!pick.on || st.rt.ncolor <= t || !st.rt.color[t] || !st.rt.color[t]->backend || pick.n >= 4096) return;
     TexBackend *b = st.rt.color[t]->backend;

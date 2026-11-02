@@ -380,7 +380,54 @@ static CmdRec *record_copy(Cpu *c, uint32_t op, int arg, uint32_t len) {
 #define PLAIN(name, op) NVN(name) { Snap s = snap(c); record(c, op, 0, &s); }
 
 // ---- state binding
+// (debugging) SAVAGEWIND_LOG_BIND_FS=<hash>[,<hash>...]: the guest call stack (frame pointer chain) of each new place
+// that binds a program whose fragment shader has that hash ([draw]'s fs hash): which game code picked a shader variant.
+// SAVAGEWIND_LOG_BIND_LR=<guest return address> | all: every program bound from there (one line a shader), whatever its hash.
+static void log_bind_fs(Cpu *c, const NvnProgram *p) {
+    static int n = -1;
+    static uint64_t want[8], lr;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("SAVAGEWIND_LOG_BIND_FS");
+        while (e && *e && n < 8) { char *end; want[n] = strtoull(e, &end, 16); if (end == e) break; n++; e = *end == ',' ? end + 1 : end; }
+        e = getenv("SAVAGEWIND_LOG_BIND_LR");
+        lr = !e ? 0 : !strcmp(e, "all") ? 1 : strtoull(e, NULL, 16);  // ("all": every call site)
+    }
+    if ((!n && !lr) || !p || !p->stages[1].code_addr) return;
+    bool by_lr = lr && (lr == 1 || c->x[30] == lr);
+    static struct { uint64_t fs, hash; } memo[256];
+    uint64_t fs = p->stages[1].code_addr, h;
+    uint32_t ms = (uint32_t)((fs * 0x9E3779B97F4A7C15ull) >> 56);
+    if (memo[ms].fs == fs) h = memo[ms].hash;
+    else {
+        const uint8_t *b = (const uint8_t *)(uintptr_t)(fs + 0x30);
+        h = 1469598103934665603ull;
+        for (int i = 0; i < 0x200; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+        memo[ms].fs = fs; memo[ms].hash = h;
+    }
+    int k = 0;
+    while (k < n && want[k] != h) k++;
+    if (k == n && !by_lr) return;
+    uint64_t chain[10] = {c->x[30]}, fp = c->x[29];
+    int depth = 1;
+    while (depth < 10 && fp >= 0x7000000000ull && fp < 0x7400000000ull && !(fp & 7)) {
+        chain[depth++] = ((const uint64_t *)(uintptr_t)fp)[1];
+        fp = ((const uint64_t *)(uintptr_t)fp)[0];
+    }
+    static uint64_t seen[1024];
+    static int nseen;
+    uint64_t key = h;
+    if (!by_lr) for (int i = 0; i < depth; i++) key = key * 31 + chain[i];
+    for (int i = 0; i < nseen; i++) if (seen[i] == key) return;
+    if (nseen < 1024) seen[nseen++] = key; else return;
+    char line[400];
+    int o = snprintf(line, sizeof line, "[bindfs] fs %016llx (code %llx) stack", (unsigned long long)h, (unsigned long long)fs);
+    for (int i = 0; i < depth && o < (int)sizeof line - 20; i++) o += snprintf(line + o, sizeof line - o, " %llx", (unsigned long long)chain[i]);
+    LOG("%s\n", line);
+}
+
 NVN(nvnCommandBufferBindProgram) {
+    log_bind_fs(c, c->x[1] ? HOST(NvnProgram, c->x[1]) : NULL);
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
     r->x[0] = (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]);  // host program
