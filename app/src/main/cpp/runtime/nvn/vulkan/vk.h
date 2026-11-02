@@ -146,7 +146,8 @@ typedef struct TexBackend {
     struct TexBackend *block;
     struct TexBackend *block_lv[16];
     uint8_t block_level;
-    bool gpu_bc4;                // BC4 kept as BC4 though SAVAGEWIND_VK_BC4_CPU is on: the GPU draws into its blocks
+    uint16_t block_z;            // the slice of a 3D b that block's texels are the blocks of (0 for 2D)
+    bool gpu_bc4;               // BC4 kept as BC4 though SAVAGEWIND_VK_BC4_CPU is on: the GPU draws into its blocks
     bool block_pending;          // (exec.c) the attachment view just made is block's: copy it after the pass
 } TexBackend;
 

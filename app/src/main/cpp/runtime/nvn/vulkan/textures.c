@@ -1359,8 +1359,9 @@ static bool is_bc(VkFormat f) { return f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <
 
 // Attachment view for a draw into the blocks of level lv of BC image b, a texel a 4x4 block in format fmt (the game's
 // view: RGBA16 UINT for 8-byte blocks): a view of b->block_lv[lv], made for it, that vk_block_flush copies (or, Mali's
-// R8 images, decodes) into that level of b after the pass. lv > 0 only on the Mali R8 path (vk_view).
-static VkImageView block_view(TexBackend *b, VkFormat fmt, uint32_t lv) {
+// R8 images, decodes) into that level of b after the pass. lv > 0 only on the Mali R8 path and for 3D images (vk_view);
+// z: the slice of a 3D b (one pass draws one slice, so the level's block image is reused slice after slice).
+static VkImageView block_view(TexBackend *b, VkFormat fmt, uint32_t lv, uint32_t z) {
     if (lv >= 16 || lv >= b->levels) return VK_NULL_HANDLE;
     TexBackend *s = b->block_lv[lv];
     if (s && s->format != fmt) {
@@ -1399,6 +1400,7 @@ static VkImageView block_view(TexBackend *b, VkFormat fmt, uint32_t lv) {
     }
     b->block = s;
     b->block_level = (uint8_t)lv;
+    b->block_z = (uint16_t)z;
     b->block_pending = true;
     return vk_image_view(s, VK_IMAGE_VIEW_TYPE_2D, fmt, 0, 1, 0, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
 }
@@ -1411,7 +1413,8 @@ void vk_block_flush(VkCommandBuffer cb, TexBackend *b) {
     if (b->bc4_cpu) { bc4_decode(cb, b); return; }
     vk_full_barrier(cb);
     VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, b->block_level, 0, 1}, .extent = {s->width, s->height, 1}};
+                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, b->block_level, 0, 1}, .dstOffset = {0, 0, (int32_t)b->block_z},
+                     .extent = {s->width, s->height, 1}};
     rec_CmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     vk_full_barrier(cb);
 }
@@ -1552,7 +1555,7 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         } else if (b->layers == 1 && b->depth == 1 && lv < b->levels) {
             // (every level: the R8 image's own levels never take the game's integers; a level the game encodes but
             // that wasn't decoded would show whenever the bubble is drawn smaller than its texture)
-            return block_view(b, fmt_of(v->format).vf, lv);
+            return block_view(b, fmt_of(v->format).vf, lv, 0);
         } else {
             static int nskip;
             if (nskip++ < 4) LOG("[vk] BC4 texture drawn into at level %u layer %u of %u: not handled (stays as uploaded)\n", lv,
@@ -1573,7 +1576,18 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (ly0 >= b->layers) ly0 = b->layers - 1;
     if (ly0 + nly > b->layers) nly = b->layers - ly0;
     if (render && fmt != b->format && is_bc(b->format) && !is_bc(fmt) && lv0 == 0 && b->layers == 1 && b->depth == 1)
-        return block_view(b, fmt, 0);  // (drawn into through a view of its blocks)
+        return block_view(b, fmt, 0, 0);  // (drawn into through a view of its blocks)
+    if (render && fmt != b->format && is_bc(b->format) && !is_bc(fmt) && !b->bc4_cpu && b->base_type == VK_IMAGE_VIEW_TYPE_3D) {
+        // A 3D compressed image drawn into slice by slice through views of its blocks, every level: BOTW encodes a
+        // 32x32x32 BC4 noise volume that way once at start (its alpha-tested shadow casters sample it). It was left
+        // out of the pass, and the volume kept whatever its memory held.
+        uint32_t z = v && (v->setmask & 2) ? v->min_layer : 0, d = b->depth >> lv0 ? b->depth >> lv0 : 1;
+        if (z >= d) return VK_NULL_HANDLE;
+        static int nlog;
+        if (nlog++ < 4) LOG("[vk] 3D compressed texture #%llu (%ux%ux%u) drawn into through its blocks: level %u slice %u\n",
+                            (unsigned long long)t->debug_id, t->width, t->height, t->depth, lv0, z);
+        return block_view(b, fmt, lv0, z);
+    }
     if (render) {
         // A view to draw into must be of an image made to be drawn into, in a format that can be (the image's usage,
         // the view format's features). Anything else, such as a compressed image's blocks the path above doesn't take
