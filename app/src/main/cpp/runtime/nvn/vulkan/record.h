@@ -44,6 +44,13 @@ void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri);
 void rec_CmdEndRendering(VkCommandBuffer cb);
 void rec_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di);
 void rec_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p);
+// A graphics pipeline still being built on a build worker: the recorder waits until *state is 1 (ready: *pipe is
+// the pipeline) or 2 (failed: the draws after it, up to the next graphics bind, are dropped) and binds it there.
+// Only with rec_on(); pipe and state must stay valid for good (exec.c's Pipe objects are never freed).
+#ifndef __cplusplus  // (C11 atomics: exec.c's)
+void rec_CmdBindPipelineWhenBuilt(VkCommandBuffer cb, VkPipeline *pipe, _Atomic int *state);
+#endif
+void rec_build_wait_stats(uint64_t *waits, uint64_t *ns);  // the recorder's waits for those builds, since the last take
 void rec_CmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t first, uint32_t n,
                                const VkDescriptorSet *sets, uint32_t ndyn, const uint32_t *dyn);
 void rec_CmdBindVertexBuffers(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *bufs, const VkDeviceSize *offs);

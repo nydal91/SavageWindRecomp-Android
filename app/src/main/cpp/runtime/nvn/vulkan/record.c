@@ -287,7 +287,12 @@ void rec_UpdateDescriptorSets(uint32_t n, const VkWriteDescriptorSet *w) {
 }
 
 // ================================================================== command buffers, submissions
+// (R) a graphics pipeline bound with rec_CmdBindPipelineWhenBuilt that failed to build: its draws are dropped, as the
+// translating thread drops a draw whose pipeline failed, until the next graphics pipeline is bound
+static bool r_drop_draws;
+
 static void begin_cb_run(const void *p) {
+    r_drop_draws = false;  // (nothing bound yet in a new command buffer)
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     VK_CHECK(vkBeginCommandBuffer(*(const VkCommandBuffer *)p, &bi));
 }
@@ -360,7 +365,10 @@ static void CmdDispatch_run(const void *p) { const CmdDispatchArgs *a = p; vkCmd
 void rec_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) { CMD_QUEUE(CmdDispatch, cb, x, y, z); }
 
 CMD_ARGS(CmdDraw, uint32_t count, inst, first, first_inst;)
-static void CmdDraw_run(const void *p) { const CmdDrawArgs *a = p; vkCmdDraw(a->cb, a->count, a->inst, a->first, a->first_inst); }
+static void CmdDraw_run(const void *p) {
+    const CmdDrawArgs *a = p;
+    if (!r_drop_draws) vkCmdDraw(a->cb, a->count, a->inst, a->first, a->first_inst);
+}
 void rec_CmdDraw(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, uint32_t first_inst) {
     CMD_QUEUE(CmdDraw, cb, count, inst, first, first_inst);
 }
@@ -368,15 +376,60 @@ void rec_CmdDraw(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t fir
 CMD_ARGS(CmdDrawIndexed, uint32_t count, inst, first; int32_t base; uint32_t first_inst;)
 static void CmdDrawIndexed_run(const void *p) {
     const CmdDrawIndexedArgs *a = p;
-    vkCmdDrawIndexed(a->cb, a->count, a->inst, a->first, a->base, a->first_inst);
+    if (!r_drop_draws) vkCmdDrawIndexed(a->cb, a->count, a->inst, a->first, a->base, a->first_inst);
 }
 void rec_CmdDrawIndexed(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t base, uint32_t first_inst) {
     CMD_QUEUE(CmdDrawIndexed, cb, count, inst, first, base, first_inst);
 }
 
 CMD_ARGS(CmdBindPipeline, VkPipelineBindPoint bp; VkPipeline p;)
-static void CmdBindPipeline_run(const void *p) { const CmdBindPipelineArgs *a = p; vkCmdBindPipeline(a->cb, a->bp, a->p); }
+static void CmdBindPipeline_run(const void *p) {
+    const CmdBindPipelineArgs *a = p;
+    if (a->bp == VK_PIPELINE_BIND_POINT_GRAPHICS) r_drop_draws = false;
+    vkCmdBindPipeline(a->cb, a->bp, a->p);
+}
 void rec_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) { CMD_QUEUE(CmdBindPipeline, cb, bp, p); }
+
+// A graphics pipeline a build worker is still making (exec.c build_pipeline): the recorder waits for it here, in
+// order with the commands, instead of the translating thread waiting where the draw is - so a frame that meets
+// twenty new pipelines has them built side by side on the workers while the translation goes on, not one after the
+// other on the queue thread. *state: 0 building, 1 ready (*pipe set first), 2 failed.
+typedef struct { VkCommandBuffer cb; VkPipeline *pipe; _Atomic int *state; } BindBuiltArgs;
+static uint64_t wait_built_state(_Atomic int *state) {  // ns waited
+    if (atomic_load_explicit(state, memory_order_acquire) != 0) return 0;
+    uint64_t t0 = NOW();
+    struct timespec ts = {0, 100000};  // (0.1 ms: builds take tens of ms)
+    while (atomic_load_explicit(state, memory_order_acquire) == 0) nanosleep(&ts, NULL);
+    return NOW() - t0;
+}
+static _Atomic uint64_t r_build_waits, r_build_wait_ns;
+static void bind_built_run(const void *p) {
+    const BindBuiltArgs *a = p;
+    uint64_t dt = wait_built_state(a->state);
+    if (dt) { ADD(r_build_waits, 1); ADD(r_build_wait_ns, dt); }
+    if (dt > 1000000000ull) {
+        static _Atomic int n;
+        if (atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 10)
+            LOG("[vk] recorder: a pipeline build took %llu ms\n", (unsigned long long)(dt / 1000000));
+    }
+    if (atomic_load_explicit(a->state, memory_order_acquire) == 1) {
+        r_drop_draws = false;
+        vkCmdBindPipeline(a->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, *a->pipe);
+    } else {
+        r_drop_draws = true;
+    }
+}
+void rec_CmdBindPipelineWhenBuilt(VkCommandBuffer cb, VkPipeline *pipe, _Atomic int *state) {
+    if (on <= 0) { wait_built_state(state); if (atomic_load(state) == 1) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, *pipe); return; }
+    ENQ_T0();
+    *(BindBuiltArgs *)push(bind_built_run, sizeof(BindBuiltArgs), 0) = (BindBuiltArgs){cb, pipe, state};
+    commit();
+    ENQ_END();
+}
+void rec_build_wait_stats(uint64_t *waits, uint64_t *ns) {
+    *waits = atomic_exchange_explicit(&r_build_waits, 0, memory_order_relaxed);
+    *ns = atomic_exchange_explicit(&r_build_wait_ns, 0, memory_order_relaxed);
+}
 
 CMD_ARGS(CmdBindIndexBuffer, VkBuffer buf; VkDeviceSize off; VkIndexType type;)
 static void CmdBindIndexBuffer_run(const void *p) { const CmdBindIndexBufferArgs *a = p; vkCmdBindIndexBuffer(a->cb, a->buf, a->off, a->type); }

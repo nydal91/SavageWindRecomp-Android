@@ -847,8 +847,8 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
-static void run_job(void (*fn)(void *), void *arg) {
-    if (sync_shaders()) { fn(arg); return; }
+// On the build workers, whatever the setting (queue_job), or where it is needed with synchronous shaders (run_job)
+static void queue_job(void (*fn)(void *), void *arg) {
     static bool started;
     if (!started) {
         started = true;
@@ -865,6 +865,21 @@ static void run_job(void (*fn)(void *), void *arg) {
     jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
+}
+static void run_job(void (*fn)(void *), void *arg) {
+    if (sync_shaders()) { fn(arg); return; }
+    queue_job(fn, arg);
+}
+
+// Synchronous shaders with the recorder thread on: a draw's new pipeline is built on a worker and the recorder waits
+// for it where the draw binds it (rec_CmdBindPipelineWhenBuilt), so the pipelines a frame meets build side by side
+// while the queue thread goes on. Nothing is skipped and nothing is drawn differently: only the wait moved. On
+// Turnip (whole pipelines, no libraries) the first sight of a new area built 10 to 40 of them one after another on
+// the queue thread: frames of 0.2 to 0.6 s. SAVAGEWIND_VK_NO_DEFERRED_BUILD=1: built where the draw is, as before.
+static bool build_deferred(void) {
+    static int off = -1;
+    if (off < 0) off = getenv("SAVAGEWIND_VK_NO_DEFERRED_BUILD") != NULL;
+    return !off && sync_shaders() && rec_on();
 }
 
 // ================================================================== state
@@ -1015,6 +1030,12 @@ const char *renderer_stats(void) {
                  rec_on() ? "on" : "off", (unsigned long long)rs.packets, rs.bytes / 1048576.0, rs.busy_ns / 1e6,
                  (unsigned long long)rs.wakeups, rs.submit_ns / 1e6, (unsigned long long)rs.drains, rs.drain_ns / 1e6,
                  (unsigned long long)rs.seq_waits, rs.seq_wait_ns / 1e6, (unsigned long long)rs.full_waits, rs.full_ns / 1e6);
+        {
+            uint64_t bw, bwns;  // (build_deferred: the recorder waiting at a bind for a pipeline still building)
+            rec_build_wait_stats(&bw, &bwns);
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, ", builds %llux %.1f ms", (unsigned long long)bw, bwns / 1e6);
+        }
         n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, " | views created %llu", (unsigned long long)prof_views_created);
         n = strlen(stats_text);
@@ -6997,14 +7018,17 @@ static void draw_(CmdRec *r, bool indexed) {
             pipe_tab[pslot].pipe = pp;
             VkPipeline ready = sync_shaders() ? VK_NULL_HANDLE : warm_ready(pr->vi, pr->fi, &k.s);
             if (ready) { pp->pipe = ready; atomic_store(&pp->state, 1); atomic_fetch_add(&stat_warm, 1); }
+            else if (build_deferred()) queue_job(build_pipeline, pp);
             else run_job(build_pipeline, pp);
         }
         pipe_memo.k = k;
         pipe_memo.pp = pp;
     }
-have_pipe:
+have_pipe:;
+    // (still building with synchronous shaders: build_deferred, the recorder waits for it at the bind)
+    bool bind_later = atomic_load(&pp->state) == 0 && build_deferred();
     if (atomic_load(&pp->state) == 0 && (one_shot_target() || draw_must_happen())) wait_built(&pp->state);
-    if (atomic_load(&pp->state) != 1) {
+    if (!bind_later && atomic_load(&pp->state) != 1) {
         if (st.rt.ncolor && vk_trace_tex(st.rt.color[0]))
             vk_trace_event(st.rt.color[0], 3, NULL, 0, "draw skipped: pipeline %s", pp->state ? "failed" : "compiling");
         stat_skipped++;
@@ -7012,7 +7036,11 @@ have_pipe:
     }
     if (no_dyn_cache) vk_dyn_forget();
     dyn_check();
-    if (!DYN_SAME(pipe, pp->pipe)) rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
+    if (bind_later) {  // (its key: the Pipe's address, odd - no driver handle is - so another can't match it)
+        if (!DYN_SAME(pipe, (VkPipeline)((uintptr_t)pp | 1))) rec_CmdBindPipelineWhenBuilt(cb, &pp->pipe, &pp->state);
+    } else if (!DYN_SAME(pipe, pp->pipe)) {
+        rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
+    }
     uint64_t prof_td_ = profd ? SDL_GetTicksNS() : 0;
     if (profd) prof_key += prof_td_ - prof_tk_;
 
