@@ -23,6 +23,7 @@
 #include "../vibration.h"
 #include "../framepace.h"
 #include "../pc_cursor.h"
+#include "../touch.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -250,15 +251,27 @@ void input_cam_frame(float ratio) {
                          ratio > 0.05f && ratio < 10.0f ? ratio / 30.0 : 1.0 / 60.0, reset);
     }
     double dx = (double)atomic_exchange(&cam_dx_milli, 0) / 1000.0, dy = (double)atomic_exchange(&cam_dy_milli, 0) / 1000.0;
+    double tdx, tdy;  // the touch controls' camera drag, degrees (taken every frame: none piles up meanwhile)
+    touch_take_look(&tdx, &tdy);
     if ((dx != 0 || dy != 0) && cam_log_left())
         LOG("[mouse] frame: %.1f %.1f counts, ratio %.3f, held %d/%d\n", dx, dy, ratio, (int)mouse_held, (int)test_mouse);
-    if (!cam_native_on() || !(mouse_held || test_mouse) || !g_settings.mouse_camera || tilt_held || (dx == 0 && dy == 0)) {
+    bool mouse = (mouse_held || test_mouse) && g_settings.mouse_camera && (dx != 0 || dy != 0);
+    bool touch = (tdx != 0 || tdy != 0) && win_focused && !menu_input_captured();
+    if (!cam_native_on() || tilt_held || (!mouse && !touch)) {
         cam_mouse = false;
         return;
     }
-    double k = CAM_DEG_PER_COUNT * g_settings.mouse_sens / (CAM_DEG_PER_TILT * (ratio > 0.05f ? ratio : 0.05f));
-    cam_vx = (float)(dx * k);
-    cam_vy = (float)(-dy * k * CAM_YAW_PER_PITCH * g_settings.mouse_sens_y * (g_settings.mouse_invert_y ? -1 : 1));  // (Controls > Mouse vertical sensitivity)
+    double per_deg = 1 / (CAM_DEG_PER_TILT * (ratio > 0.05f ? ratio : 0.05f));  // (a turn in degrees -> tilt)
+    double k = CAM_DEG_PER_COUNT * g_settings.mouse_sens * per_deg;
+    cam_vx = cam_vy = 0;
+    if (mouse) {
+        cam_vx = (float)(dx * k);
+        cam_vy = (float)(-dy * k * CAM_YAW_PER_PITCH * g_settings.mouse_sens_y * (g_settings.mouse_invert_y ? -1 : 1));  // (Controls > Mouse vertical sensitivity)
+    }
+    if (touch) {  // (a drag up looks up, as the mouse does)
+        cam_vx += (float)(tdx * per_deg);
+        cam_vy += (float)(-tdy * per_deg * CAM_YAW_PER_PITCH);
+    }
     cam_mouse = true;
 }
 
@@ -348,6 +361,7 @@ static void window_focus(bool focused) {
     if (focused == win_focused) return;
     win_focused = focused;
     input_reset();
+    touch_reset();
     mouse_dx_milli = mouse_dy_milli = cam_dx_milli = cam_dy_milli = 0;
     recompute_pad();  // release cached controls on loss; sample current controls on return
 }
@@ -464,6 +478,7 @@ int input_pad_family(void) {
 }
 
 void input_handle_event(const SDL_Event *e) {
+    if (touch_event(e)) return;  // (the touch controls' fingers, and the mouse events SDL makes from them)
     if (pc_cursor_event(e)) return;
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
@@ -487,6 +502,7 @@ void input_handle_event(const SDL_Event *e) {
             control_enabled() && !menu_input_captured()) control_fly_toggle();  // (fly mode, test builds)
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         if (e->type == SDL_EVENT_KEY_DOWN) last_device = DEVICE_KEYBOARD;
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode != SDL_SCANCODE_AC_BACK) touch_other_input();
         recompute_keyboard();
         break;
     case SDL_EVENT_MOUSE_WHEEL:
@@ -539,8 +555,10 @@ void input_handle_event(const SDL_Event *e) {
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         if (win_focused && pad && !host_test && (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
-                                  (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 16000)))
+                                  (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 16000))) {
             last_device = DEVICE_PAD;
+            touch_other_input();  // (the overlay hides until the next touch)
+        }
         recompute_pad();
         break;
     }
@@ -778,7 +796,7 @@ void input_frame(uint64_t frame) {
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
 uint64_t input_buttons_now(void) {
     bool muted = (!win_focused && !host_test) || menu_input_captured();
-    uint64_t b = (muted ? 0 : key_buttons | pad_buttons | escape_buttons) | script_buttons;
+    uint64_t b = (muted ? 0 : key_buttons | pad_buttons | escape_buttons | touch_buttons()) | script_buttons;
     control_input_apply(&b, NULL, NULL, NULL, NULL);
     return b;
 }
@@ -805,7 +823,7 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", (unsigned long long)(c->x[1] - 8));
     }
     bool menu = (!win_focused && !host_test) || menu_input_captured();  // host controls belong to the focused game window
-    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | escape_buttons | script_buttons;
+    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | escape_buttons | touch_buttons() | script_buttons;
     b=pc_cursor_buttons(b);
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
@@ -816,6 +834,11 @@ static void fill_state(Cpu *c) {
     // (the controller's sticks turning a shrine apparatus move neither Link nor the camera meanwhile)
     bool sticks = !menu && !dualstick_on();
     int32_t plx = sticks ? pad_lx : 0, ply = sticks ? pad_ly : 0, prx = sticks ? pad_rx : 0, pry = sticks ? pad_ry : 0;
+    if (!menu) {  // (the touch controls' stick)
+        int32_t tx, ty;
+        touch_stick(&tx, &ty);
+        plx += tx, ply += ty;
+    }
     bool map_keys=pc_cursor_map_navigation();
     int32_t lx = clamp_axis((menu ? 0 : (map_keys?0:key_lx) + plx) + script_lx), ly = clamp_axis((menu ? 0 : (map_keys?0:key_ly) + ply) + script_ly);
     // Gate at each poll: an arrow or Enter held when a menu closes must never move the player or press A.
@@ -831,7 +854,7 @@ static void fill_state(Cpu *c) {
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
-        uint64_t d = key_buttons | pad_buttons | script_buttons;
+        uint64_t d = key_buttons | pad_buttons | touch_buttons() | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)

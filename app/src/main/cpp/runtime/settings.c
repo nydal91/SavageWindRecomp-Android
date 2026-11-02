@@ -165,6 +165,7 @@ void settings_load(void) {
         else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
         else if (!strcmp(key, "pc_gyro")) g_settings.pc_gyro = atoi(val) != 0;
         else if (!strcmp(key, "gyro_scene")) g_settings.gyro_scene = atoi(val) != 0;
+        else if (!strcmp(key, "touch_controls")) g_settings.touch_controls = atoi(val) != 0;
         else if (!strcmp(key, "motion_sensitivity")) g_settings.motion_sens = (float)atof(val);
         else if (!strcmp(key, "motion_invert")) {  // (off, up_down, left_right, both)
             g_settings.motion_invert = !strcmp(val, "both") ? MOTION_INVERT_UD | MOTION_INVERT_LR :
@@ -314,6 +315,7 @@ void settings_save(void) {
     fprintf(f, "mouse_invert_y = %d\n", g_settings.mouse_invert_y);
     fprintf(f, "pc_gyro = %d\n", g_settings.pc_gyro);
     fprintf(f, "gyro_scene = %d\n", g_settings.gyro_scene);
+    fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
     fprintf(f, "motion_sensitivity = %.2f\n", g_settings.motion_sens);
     static const char *const inv[4] = {"off", "up_down", "left_right", "both"};
     fprintf(f, "motion_invert = %s\n", inv[g_settings.motion_invert & 3]);

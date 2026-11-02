@@ -47,6 +47,7 @@ void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../perfmon.h"
 #include "../paths.h"
 #include "../pc_cursor.h"
+#include "../touch.h"
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -1106,6 +1107,10 @@ static void tab_quit(float scale, bool in_game) {
 }
 
 static void tab_about(void) {
+    header("Touch");
+    toggle("Touch controls", &g_settings.touch_controls);
+    hint("A controller on the screen: a stick on the left, drag elsewhere to turn the camera. It hides while a controller is used and comes back at the next touch.");
+    ImGui::Spacing();
     header("Movement");
     toggle("D-pad as left stick", &g_settings.dpad_move);
     hint("The d-pad (and the arrow keys) also move like the left stick while the stick is at rest.");
@@ -1145,6 +1150,30 @@ RT_ON_RESET(menu_reset) {
 
 // Performance overlay (F10), in the style of MangoHud: the game's frame rate and frame times, and the machine's load
 // and temperatures (runtime/perfmon.c). Numbers the platform doesn't give read "-".
+// The touch controls (runtime/touch.c): the buttons, and the stick where it is held (faint where it rests)
+static void touch_overlay_draw(ImGuiIO &io) {
+    TouchView v;
+    float h = io.DisplaySize.y;
+    if (h <= 0 || !touch_view(io.DisplaySize.x / h, &v)) return;
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();  // (under any window: the performance overlay stays readable)
+    ImFont *font = g_font_big ? g_font_big : ImGui::GetFont();
+    for (int i = 0; i < v.nbuttons; i++) {
+        const TouchButtonView &b = v.buttons[i];
+        ImVec2 c(b.x * h, b.y * h);
+        float r = b.r * h;
+        dl->AddCircleFilled(c, r, b.held ? IM_COL32(255, 235, 155, 120) : IM_COL32(20, 20, 20, 70));
+        dl->AddCircle(c, r, b.held ? IM_COL32(255, 235, 155, 230) : IM_COL32(250, 250, 240, 150), 0, fmaxf(2, r * 0.06f));
+        float fs = r * (strlen(b.label) > 1 ? 0.8f : 1.0f);
+        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, b.label);
+        dl->AddText(font, fs, ImVec2(c.x - ts.x / 2, c.y - ts.y / 2), IM_COL32(250, 250, 240, b.held ? 255 : 190), b.label);
+    }
+    ImVec2 base(v.stick_x * h, v.stick_y * h), knob(v.knob_x * h, v.knob_y * h);
+    float r = v.stick_r * h, a = v.stick_held ? 1.0f : 0.5f;
+    dl->AddCircleFilled(base, r, IM_COL32(20, 20, 20, (int)(70 * a)));
+    dl->AddCircle(base, r, IM_COL32(250, 250, 240, (int)(150 * a)), 0, fmaxf(2, r * 0.04f));
+    dl->AddCircleFilled(knob, r * 0.45f, IM_COL32(250, 250, 240, (int)(120 * a)));
+}
+
 static void perf_cell(const char *fmt, float v) {
     ImGui::TableNextColumn();
     if (v < 0) ImGui::TextDisabled("-");
@@ -1496,7 +1525,7 @@ static bool menu_draws(bool *pointer_hover = NULL, float *pointer_box = NULL, bo
     if (pointer_hover) *pointer_hover = hover;
     if (gyro_show) *gyro_show = gyro_on;
     return g_open.load() || g_kbd.load() == 1 || g_sizes.load() || console_is_open() || gyro_on || hover ||
-           g_settings.perf_overlay != PERF_OFF;
+           g_settings.perf_overlay != PERF_OFF || touch_active();
 }
 
 bool menu_render_needed(void) { return menu_draws(); }
@@ -1580,6 +1609,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 
     if (g_settings.perf_overlay != PERF_OFF) perf_overlay_draw(io, scale);
     if (!open && !kbd && !sizes && !con && gyro_scene_show) gyro_scene_draw(io, scale, gyro_scene);
+    if (!open && !kbd && !sizes && !con) touch_overlay_draw(io);
 
     if (open) {
         // dim the game behind the menu

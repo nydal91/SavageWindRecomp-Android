@@ -65,7 +65,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${RUNTIME}/nvn/maxwell/translate.c" "${RUNTIME}/nvn/maxwell/shader.h" "${RUNTIME}/nvn/vulkan/spirv.c")
 
 # ------------------------------------------------------------------ sources
-file(GLOB RT_SRC ${RUNTIME}/*.c ${RUNTIME}/hle/*.c ${RUNTIME}/services/*.c
+file(GLOB RT_SRC CONFIGURE_DEPENDS ${RUNTIME}/*.c ${RUNTIME}/hle/*.c ${RUNTIME}/services/*.c
                  ${RUNTIME}/nvn/*.c ${RUNTIME}/nvn/maxwell/*.c)
 file(GLOB VK_SRC ${RUNTIME}/nvn/vulkan/*.c ${RUNTIME}/nvn/vulkan/*.cpp)
 file(GLOB UI_SRC ${RUNTIME}/ui/*.mm)

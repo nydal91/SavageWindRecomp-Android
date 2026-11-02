@@ -87,6 +87,7 @@ typedef struct {
     bool mouse_invert_y; // mouse up looks down
     bool pc_gyro;        // keyboard gyro only during shrine apparatus interaction
     bool gyro_scene;     // left-drag rotation during a shrine apparatus interaction
+    bool touch_controls; // on-screen controller over the game (runtime/touch.c)
     float motion_sens;   // motion controls: how far turning the controller turns the aim, 1 = 100%
     int motion_invert;   // MOTION_INVERT_* bits: turning the controller up / down, left / right goes the other way
     int button_icons;    // ICONS_*: the game's button prompts show this device's buttons (Automatic: the one in use)

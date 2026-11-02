@@ -544,6 +544,10 @@ void build_items(void) {
                        [](const Item &, int x) { g_settings.movie_audio = x; }, 1));
 
     // Controls
+    v.push_back(toggle(P_CONTROLS, "Touch controls",  // (runtime/touch.c)
+                       "A controller on the screen: stick on the left, drag elsewhere for the camera. Hidden while a controller is used.",
+                       [](const Item &) { return (int)g_settings.touch_controls; },
+                       [](const Item &, int x) { g_settings.touch_controls = x; }, 0));
     v.push_back(toggle(P_CONTROLS, "D-pad as left stick", "The d-pad also moves like the left stick.",
                        [](const Item &) { return (int)g_settings.dpad_move; },
                        [](const Item &, int x) { g_settings.dpad_move = x; }, 0));
