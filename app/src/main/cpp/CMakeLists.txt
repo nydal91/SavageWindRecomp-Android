@@ -24,7 +24,7 @@ include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 # from the generator sources, the headers they compile against, and the flags).
 set(GAMELIB_ID_FILES
     ${PY}/gen.py ${PY}/lifter.py ${PY}/analyze.py ${PY}/nso.py
-    ${PY}/passes.py ${PY}/patches.py ${PY}/simd_c.py
+    ${PY}/passes.py ${PY}/patches.py ${PY}/simd_c.py ${PY}/regs.py ${PY}/flags.py
     ${TOOLS}/gamelib_entry.c
     ${RUNTIME}/hle/hle_symbols.txt
     ${RUNTIME}/cpu.h ${RUNTIME}/simd.h ${RUNTIME}/simd_fp.h ${RUNTIME}/simd_softfma.h ${RUNTIME}/gamelib.h

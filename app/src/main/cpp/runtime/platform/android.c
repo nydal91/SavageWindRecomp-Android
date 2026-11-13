@@ -55,6 +55,22 @@ void plat_decommit(uint64_t addr, uint64_t size) {  // (as linux.c)
 
 void plat_cpu_placement(void) {}  // (one logical processor per core: Windows only)
 
+int plat_cpu_count(void) {  // (as linux.c)
+    cpu_set_t s;
+    if (sched_getaffinity(0, sizeof s, &s) == 0 && CPU_COUNT(&s) > 0) return CPU_COUNT(&s);
+    return SDL_GetNumLogicalCPUCores();
+}
+
+bool plat_committed_range(uint64_t addr, uint64_t end, uint64_t *a, uint64_t *e) {  // (the whole window is backed)
+    if (addr >= end) return false;
+    *a = addr, *e = end;
+    return true;
+}
+
+bool plat_guest_sparse_heap_enabled(void) { return false; }  // (Windows only)
+
+void plat_accessibility_shortcuts(bool allow) { (void)allow; }  // (Windows only)
+
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
     int p = prot == PLAT_PROT_NONE ? PROT_NONE : prot == PLAT_PROT_READ ? PROT_READ : PROT_READ | PROT_WRITE;
     return mprotect((void *)(uintptr_t)addr, size, p);
@@ -72,6 +88,8 @@ void plat_sleep_until_ns(uint64_t t) {
     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
 }
 
+void plat_wait_until_ns(uint64_t t) { plat_sleep_until_ns(t); }  // (clock_nanosleep doesn't spin)
+
 // The vsync thread: SCHED_FIFO needs privileges an app doesn't have; the nice bump is what
 // normal Linux threads get too.
 void plat_thread_realtime(uint64_t period_ns) {
@@ -86,6 +104,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 // (SAVAGEWIND_DATA_ROOT, set by MainActivity before the runtime starts; rt_paths_init uses the
 // same variable later).
 static char g_log_path[1024];
+const char *plat_log_path(void) { return g_log_path; }
 
 static void log_to_file(void) {
     if (isatty(STDERR_FILENO)) return;  // (adb shell runs: keep the terminal output)
