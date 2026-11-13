@@ -1,5 +1,10 @@
 // User settings (savagewind.ini in the data root, runtime/paths.h), edited from the in-game menu.
 #pragma once
+#ifdef __ANDROID__
+#define HUD_EDGES_DEFAULT 1  // (a phone's screen is wider than 16:9: the hearts and the minimap at its sides)
+#else
+#define HUD_EDGES_DEFAULT 0
+#endif
 #include <stdbool.h>
 
 // Upscalers (Video > Upscaler; runtime/nvn/output_scale.c): Off renders at the window's size; the others render
@@ -150,7 +155,7 @@ typedef struct {
     int sharper_menus;   // the menus' one-channel textures enlarged this many times (2 or 4; 0: off), runtime/nvn/text_upscale.c
     int sharper_text;    // the game's font sheets enlarged this many times (2 or 4; 0: off), runtime/nvn/text_upscale.c
     bool wide_view;      // a window that isn't 16:9 shows more of the world instead of bars (runtime/nvn/output_scale.c)
-    bool hud_edges;      // on windows taller than 16:9 with wide_view, anchor HUD to the window edges
+    bool hud_edges;      // on windows that aren't 16:9 with wide_view, anchor the HUD to the window edges (HUD_EDGES_DEFAULT)
     int hdr;             // HDR_* (runtime/nvn/vulkan/device.c hdr_*)
     int hdr_white;       // nits of SDR white in HDR (0: what Windows gives SDR content on that monitor)
     int sparse_heap;     // SPARSE_HEAP_*: guest heap backing (Windows Vulkan; applied on next start)

@@ -2480,6 +2480,15 @@ static VkRect2D scissor_rect(void) {
         if (x > 0 || x + sw < gw - 0.5) {
             double c = gw / 2, x0 = c + (x - c) / shape, x1 = c + (x + sw - c) / shape;
             x = (int)floor(x0); sw = (int)ceil(x1) - x;
+            int edge_mode = hud_edges_now(shape);  // (HUD at edges on a wider window: the minimap's mask with the minimap)
+            if (edge_mode && pass_sy > 0) {
+                double gh = h / pass_sy, cy = y + sh / 2.0;
+                float mx = (float)((x0 + x1) / gw - 1), my = (float)(1 - cy / gh * 2);
+                double sdx = hud_edge_scissor_dx((x0 + x1) / 2.0, gw, shape);
+                if (sdx != 0 && sh < gh * 0.9 && hud_edge_moves(edge_mode, my, 1) &&
+                    !(hud_quick && hud_quick_bar(mx, my, 1 / shape, 1)))
+                    x += (int)round(sdx);
+            }
         }
     }
     if (shape < 1 && pass_out && pass_sy > 0 && sh < 16384) {  // (a taller window: the same, vertically)
@@ -4937,6 +4946,10 @@ static bool hud_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out)
         float tx = text_matrix[3] / text_matrix[15], ty = text_matrix[7] / text_matrix[15];
         if (hud_s != 1 && !(hud_quick && hud_quick_keeps(tx, ty, edge_x, edge_y)))
             hud_scale_matrix(text_matrix, hud_s, hud_anchor(tx, edge_x), hud_anchor(ty, edge_y));
+        // (HUD at edges on a wider window: a label in an outer third goes with its pane - the clock's time, the sensor's
+        // count; tx is the label's origin)
+        if (hud_edge_active && hud_edge_moves(edge_mode, ty, edge_y) && !(hud_quick && hud_quick_bar(tx, ty, edge_x, edge_y)))
+            hud_edge_matrix_x(text_matrix, hud_edge_dx(hud_anchor(tx, edge_x), edge_x, shape));
         *out = ubo_span(vk_transient_copy(text_matrix, sizeof text_matrix, 256), sizeof text_matrix);
         return true;
     }
@@ -4958,6 +4971,7 @@ static bool hud_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out)
             float ay = hud_anchor(ty, edge_y);
             float dy = hud_edge_dy(ay, edge_y, shape);
             if (dy != 0) hud_edge_matrix(buf, dy);
+            hud_edge_matrix_x(buf, hud_edge_dx(hud_anchor(tx, edge_x), edge_x, shape));
         }
         *out = ubo_span(vk_transient_copy(buf, n, 256), n);
         return true;
@@ -5023,7 +5037,7 @@ static bool hud_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out)
     // Gameplay > HUD size: a pane of a 40-degree layer, and not one over about the whole screen (a fade, a picture)
     float hud_ax = 0, hud_ay = 0;
     bool hud_scale = false;
-    float edge_dy = 0;
+    float edge_dy = 0, edge_dx = 0;
     if ((hud_s != 1 || hud_edge_active) && size >= 28 * 4 && fabsf((tall ? m11 / shape : m11) - 2.74748f) < 0.001f) {
         const float *mv = g + 16, *rc = g + 33 * 4;
         bool has_rect = size >= 34 * 16 && rc[0] > 0 && rc[1] > 0;
@@ -5043,17 +5057,18 @@ static bool hud_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out)
             hud_ay = hud_anchor(cy, edge_y);
             if (hud_edge_active && hud_edge_moves(edge_mode, cy, edge_y) &&
                 !(hud_quick && hud_quick_bar(cx, cy, edge_x, edge_y)) && !hud_shop_pane(mv[3], mv[7]))
-                edge_dy = hud_edge_dy(hud_ay, edge_y, shape);
+                edge_dy = hud_edge_dy(hud_ay, edge_y, shape), edge_dx = hud_edge_dx(hud_ax, edge_x, shape);
             hud_scale = hud_s != 1 && !(hud_quick && hud_quick_keeps(cx, cy, edge_x, edge_y));
         }
     }
-    if (m00 == g[0] && m11 == g[5] && !hud_scale && edge_dy == 0) return false;
+    if (m00 == g[0] && m11 == g[5] && !hud_scale && edge_dy == 0 && edge_dx == 0) return false;
     static float buf[0x10000 / 4];
     uint64_t n = size > sizeof buf ? sizeof buf : size;
     memcpy(buf, g, n);
     buf[0] = m00, buf[5] = m11;
     if (hud_scale) hud_scale_view(buf + 16, hud_s, m00, m11, hud_ax, hud_ay);
     if (edge_dy != 0) hud_edge_view(buf + 16, m11, edge_dy);
+    if (edge_dx != 0) hud_edge_view_x(buf + 16, m00, edge_dx);
     *out = ubo_span(vk_transient_copy(buf, n, 256), n);
     return true;
 }

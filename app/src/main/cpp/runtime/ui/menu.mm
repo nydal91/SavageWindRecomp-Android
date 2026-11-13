@@ -800,7 +800,7 @@ static void tab_display(void) {
     }
     {   // HUD at edges
         bool he = g_settings.hud_edges;
-        if (opt_toggle("HUD at edges", &he, false,
+        if (opt_toggle("HUD at edges", &he, HUD_EDGES_DEFAULT,
                        "On windows taller than 16:9 with Fill wide screens, anchors the top and bottom HUD to the window edges."))
             g_settings.hud_edges = he;
     }

@@ -60,7 +60,7 @@ static inline bool hud_quick_bar_px(double cx, double cy, double gw, double gh, 
 // window's edge while the box and its text stayed in the 16:9 band (#599), and the area name, still fading out when an
 // event starts, stays at the edge instead of dropping into the band.
 static inline int hud_edge_mode(bool setting, float shape, bool menu, bool title, bool loading, bool event) {
-    if (!setting || shape >= 1 || menu || title || loading) return 0;
+    if (!setting || shape == 1 || menu || title || loading) return 0;  // (taller and wider windows)
     return event ? 2 : 1;
 }
 
@@ -77,6 +77,36 @@ static inline bool hud_quick_tracked(int hud_size, bool hud_edges) { return hud_
 static inline float hud_edge_dy(float ay, float edge_y, float shape) {
     if (shape >= 1 || edge_y <= 0) return 0;
     return (ay / edge_y) * (1.0f - shape);
+}
+
+// On windows wider than 16:9 (shape > 1), outer horizontal anchors move from the 16:9 edge (1 / shape) to the window
+// edge (1): the hearts to the left side, the minimap and the clock to the right (a 20:9 phone, an ultrawide monitor)
+static inline float hud_edge_dx(float ax, float edge_x, float shape) {
+    if (shape <= 1 || edge_x <= 0) return 0;
+    return (ax / edge_x) * (1.0f - edge_x);
+}
+
+// Offset a pane's view matrix horizontally by dx in projected coordinates
+static inline void hud_edge_view_x(float *v, float m00, float dx) {
+    if (dx == 0) return;
+    for (int k = 0; k < 4; k++)
+        v[k] -= dx / m00 * v[8 + k];
+}
+
+// Offset a matrix with the view already in it (text, the clock) horizontally by dx
+static inline void hud_edge_matrix_x(float *m, float dx) {
+    if (dx == 0) return;
+    for (int k = 0; k < 4; k++)
+        m[k] += dx * m[12 + k];
+}
+
+// Offset a scissor rectangle horizontally on a screen wider than 16:9: x_center in pixels of a gw-wide target, already
+// narrowed to the 16:9 band (exec.c scissor_rect)
+static inline double hud_edge_scissor_dx(double x_center, double gw, double shape) {
+    if (shape <= 1 || gw <= 0) return 0;
+    float mx = (float)((x_center / gw * 2.0 - 1.0) * shape);  // (-1..1 across the band)
+    double dir = mx > 1.0f / 3.0f ? 1.0 : mx < -1.0f / 3.0f ? -1.0 : 0.0;
+    return dir * (gw / 2.0) * (1.0 - 1.0 / shape);
 }
 
 // Offset a pane's view matrix vertically by dy in projected coordinates
