@@ -756,6 +756,14 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             char last[300];
             log_tail(log, last, sizeof last);
             LOG("[gamebuild] linking failed: %s\n", last);
+#ifdef __ANDROID__
+            {  // (the work folder goes after the build: the linker's whole message into savagewind.log)
+                FILE *lf = fopen(log, "rb");
+                char line[512];
+                for (int n = 0; lf && n < 80 && fgets(line, sizeof line, lf); n++) LOG("[gamebuild]   | %s", line);
+                if (lf) fclose(lf);
+            }
+#endif
             snprintf(why, why_size, "the game code didn't link: %s", last);
             ok = false;
         }

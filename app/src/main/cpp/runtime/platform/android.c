@@ -99,6 +99,9 @@ void plat_thread_realtime(uint64_t period_ns) {
     setpriority(PRIO_PROCESS, (id_t)gettid(), -10);
 }
 
+// (desktop: favour P-cores on hybrid CPUs. Android's scheduler places busy threads on the big cores itself)
+void plat_thread_elevate(void) {}
+
 // ---- process
 // stderr goes nowhere useful inside an app: the log lands in savagewind.log in the data folder
 // (SAVAGEWIND_DATA_ROOT, set by MainActivity before the runtime starts; rt_paths_init uses the

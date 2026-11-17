@@ -96,7 +96,7 @@ target_compile_definitions(main PRIVATE
     VK_USE_PLATFORM_ANDROID_KHR)  # (AHardwareBuffer import: the guest heap, exec.c heap_pieces)
 # gamebuild.c / gamelib.c carry the game-code build's flags (as the Makefile's -D does)
 set_source_files_properties(${RUNTIME}/gamebuild.c ${RUNTIME}/gamelib.c PROPERTIES
-    COMPILE_DEFINITIONS "GAMELIB_CFLAGS=\"-O1 -fno-strict-aliasing\";GAMELIB_SHARED=\"-shared\"")
+    COMPILE_DEFINITIONS "GAMELIB_CFLAGS=\"-O1 -fno-strict-aliasing -fvisibility=hidden\";GAMELIB_SHARED=\"-shared\"")
 # (only the two files that use them: a new id recompiles those, not the whole runtime)
 set_source_files_properties(${RUNTIME}/nvn/maxwell/translate.c PROPERTIES COMPILE_DEFINITIONS "TRANSLATOR_ID=\"${TRANSLATOR_ID}\"")
 set_source_files_properties(${RUNTIME}/nvn/vulkan/spirv.c PROPERTIES COMPILE_DEFINITIONS "SPIRV_ID=\"${SPIRV_ID}\"")
